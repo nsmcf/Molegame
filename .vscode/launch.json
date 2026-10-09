@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "MoleGame mouse preview",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/camera-release/MoleGame.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build MoleGame Release",
+      "externalConsole": false,
+      "environment": [
+        {"name": "PATH", "value": "D:/opencv/build/x64/vc16/bin;D:/pylon/Runtime/x64;D:/pylon/Applications/x64/bin;D:/CUDADevelopment/bin;D:/TensorRT-8.6.1.6/TensorRT-8.6.1.6/lib;D:/cuDNN-8.9.7/cudnn-windows-x86_64-8.9.7.29_cuda11-archive/bin;${env:PATH}"},
+        {"name": "CUDA_PATH", "value": "D:/CUDADevelopment"}
+      ]
+    },
+    {
+      "name": "MoleGame camera preview",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/camera-release/MoleGame.exe",
+      "args": ["--camera-preview"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build MoleGame Release",
+      "externalConsole": false,
+      "environment": [
+        {"name": "PATH", "value": "D:/opencv/build/x64/vc16/bin;D:/pylon/Runtime/x64;D:/pylon/Applications/x64/bin;D:/CUDADevelopment/bin;D:/TensorRT-8.6.1.6/TensorRT-8.6.1.6/lib;D:/cuDNN-8.9.7/cudnn-windows-x86_64-8.9.7.29_cuda11-archive/bin;${env:PATH}"},
+        {"name": "CUDA_PATH", "value": "D:/CUDADevelopment"}
+      ]
+    }
+  ]
+}

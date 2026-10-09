@@ -1,0 +1,7 @@
+{
+  "opencv_root": "D:/opencv",
+  "basler_root": "D:/pylon",
+  "cuda_root": "D:/CUDADevelopment",
+  "tensorrt_root": "D:/TensorRT-8.6.1.6/TensorRT-8.6.1.6",
+  "cudnn_root": "D:/cuDNN-8.9.7/cudnn-windows-x86_64-8.9.7.29_cuda11-archive"
+}

@@ -1,0 +1,9 @@
+/build/
+/outputs/
+/config/local.json
+/models/*.onnx
+/models/*.engine
+*.user
+*.pdb
+*.obj
+.vs/

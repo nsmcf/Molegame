@@ -1,0 +1,13 @@
+%YAML:1.0
+---
+backend: tensorrt
+onnx_model: "models/hand_detector.onnx"
+tensorrt_engine: "models/hand_detector.engine"
+tensorrt_fp16_engine: "models/hand_detector_fp16_io.engine"
+tensorrt_fast_engine: "models/hand_detector_416_fp16_io.engine"
+class_names: "models/classes.names"
+confidence_threshold: 0.65
+nms_threshold: 0.45
+use_cuda_graph: 1
+use_gpu_pipeline: 1
+use_spin_wait: 0
