@@ -1,5 +1,34 @@
 #include "CameraInput.h"
 #include <iostream>
+#include <utility>
+#include <opencv2/imgproc.hpp>
+#include <cmath>
+#include <stdexcept>
+
+std::vector<cv::Point2f> calibrationTargets(cv::Size size) {
+    const float x = size.width * 0.1f, y = size.height * 0.15f;
+    return {{x, y}, {size.width - x, y}, {size.width - x, size.height - y}, {x, size.height - y}};
+}
+
+cv::Mat cameraToGameTransform(const std::vector<cv::Point2f>& corners,
+                              cv::Size cameraSize, cv::Size gameSize) {
+    if (corners.size() != 4 || cameraSize.width <= 0 || cameraSize.height <= 0 ||
+        gameSize.width <= 0 || gameSize.height <= 0)
+        throw std::runtime_error("Calibration requires four points and positive image sizes");
+    for (const auto& p : corners) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || p.x < 0 || p.y < 0 ||
+            p.x >= cameraSize.width || p.y >= cameraSize.height)
+            throw std::runtime_error("Calibration points must be inside the camera image");
+    }
+    if (!cv::isContourConvex(corners) ||
+        std::abs(cv::contourArea(corners)) < cameraSize.area() * 0.01)
+        throw std::runtime_error("Invalid point order or area. Press H and click projected labels 1,2,3,4");
+    const auto targets = calibrationTargets(gameSize);
+    cv::Mat transform = cv::getPerspectiveTransform(corners, targets);
+    if (!cv::checkRange(transform) || std::abs(cv::determinant(transform)) < 1e-10)
+        throw std::runtime_error("Degenerate calibration");
+    return transform;
+}
 
 #ifdef MOLE_WITH_CAMERA
 #include "vision/YoloHandTracker.h"
@@ -11,6 +40,10 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <exception>
+#include <future>
+#include <mutex>
+#include <thread>
 
 namespace {
 struct CameraSettings {
@@ -73,6 +106,104 @@ void requireDetector(YoloHandTracker& detector) {
 }
 }
 
+struct CameraInput::Impl {
+    cv::Size size;
+    std::string serial;
+    std::mutex mutex;
+    cv::Mat preview;
+    std::vector<HandObservation> pending;
+    std::size_t dropped = 0;
+    std::exception_ptr failure;
+    // 最后声明，确保销毁时先停止并等待线程，再释放共享数据。
+    std::jthread worker;
+
+    Impl() {
+        std::promise<void> ready;
+        auto initialized = ready.get_future();
+        worker = std::jthread([this, signal = std::move(ready)](std::stop_token stop) mutable {
+            bool started = false;
+            const auto fail = [&](std::exception_ptr error) {
+                { std::lock_guard lock(mutex); failure = error; }
+                if (!started) signal.set_exception(error);
+            };
+            try {
+                Pylon::PylonAutoInitTerm pylon;
+                Pylon::CBaslerUniversalInstantCamera camera(Pylon::CTlFactory::GetInstance().CreateFirstDevice());
+                camera.Open();
+                const auto settings = readCameraSettings();
+                camera.Width.SetValue(settings.width);
+                camera.Height.SetValue(settings.height);
+                camera.ExposureAuto.SetValue(Basler_UniversalCameraParams::ExposureAuto_Off);
+                camera.ExposureTime.SetValue(settings.exposureUs);
+                if (camera.AcquisitionFrameRateEnable.IsWritable()) camera.AcquisitionFrameRateEnable.SetValue(false);
+                size = {static_cast<int>(camera.Width.GetValue()), static_cast<int>(camera.Height.GetValue())};
+                serial = camera.GetDeviceInfo().GetSerialNumber().c_str();
+                YoloHandTracker detector(readYoloSettings(size));
+                requireDetector(detector);
+                Pylon::CImageFormatConverter converter;
+                converter.OutputPixelFormat = Pylon::PixelType_BGR8packed;
+                converter.OutputBitAlignment = Pylon::OutputBitAlignment_MsbAligned;
+                Pylon::CPylonImage image;
+                camera.StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
+                signal.set_value();
+                started = true;
+                std::uint64_t sequence = 0;
+                auto lastFrameAt = HandObservation::Clock::now();
+                while (!stop.stop_requested()) {
+                    Pylon::CGrabResultPtr grab;
+                    if (!camera.RetrieveResult(100, grab, Pylon::TimeoutHandling_Return)) {
+                        if (HandObservation::Clock::now() - lastFrameAt > std::chrono::seconds(2))
+                            throw std::runtime_error("No camera frames for 2 seconds; check connection and camera trigger settings");
+                        continue;
+                    }
+                    if (!grab->GrabSucceeded()) throw std::runtime_error("Camera grab failed");
+                    converter.Convert(image, grab);
+                    cv::Mat frame = cv::Mat(size.height, size.width, CV_8UC3, image.GetBuffer()).clone();
+                    HandObservation observation;
+                    observation.sequence = ++sequence;
+                    observation.capturedAt = HandObservation::Clock::now();
+                    lastFrameAt = observation.capturedAt;
+                    YoloHandDetection detection;
+                    detector.detect(frame, detection);
+                    if (!detector.lastError().empty()) throw std::runtime_error(detector.lastError());
+                    observation.completedAt = HandObservation::Clock::now();
+                    observation.detectorMs = detector.lastPerformance().totalMs;
+                    for (const auto& hand : detection.boxes) {
+                        observation.centers.emplace_back(hand.center);
+                        cv::rectangle(frame, hand.box, cv::Scalar(0, 220, 0), 2);
+                        cv::circle(frame, hand.center, 5, cv::Scalar(0, 220, 255), -1);
+                    }
+                    std::lock_guard lock(mutex);
+                    if (pending.size() >= 512) {
+                        dropped += pending.size();
+                        pending.clear();
+                    }
+                    pending.push_back(std::move(observation));
+                    preview = std::move(frame);
+                }
+                camera.StopGrabbing();
+                camera.Close();
+            } catch (const GenICam::GenericException& error) {
+                fail(std::make_exception_ptr(std::runtime_error(error.GetDescription())));
+            } catch (...) { fail(std::current_exception()); }
+        });
+        initialized.get();
+    }
+};
+
+CameraInput::CameraInput() : impl_(std::make_unique<Impl>()) {}
+CameraInput::~CameraInput() = default;
+cv::Size CameraInput::frameSize() const { return impl_->size; }
+const std::string& CameraInput::deviceId() const { return impl_->serial; }
+void CameraInput::poll(CameraUpdate& update) {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->failure) std::rethrow_exception(impl_->failure);
+    update.preview = impl_->preview;
+    update.observations.clear();
+    update.observations.swap(impl_->pending);
+    update.dropped = std::exchange(impl_->dropped, 0);
+}
+
 // 仅检查迁移模型，不连接相机或打开窗口。
 int checkHandModel(const std::string& imagePath) {
     try {
@@ -96,68 +227,30 @@ int checkHandModel(const std::string& imagePath) {
 // 独立预览只验证采集和手模型，不用于正式地鼠判定。
 int runCameraPreview() {
     try {
-        Pylon::PylonAutoInitTerm pylon;
-        Pylon::CBaslerUniversalInstantCamera camera(Pylon::CTlFactory::GetInstance().CreateFirstDevice());
-        camera.Open();
-        const auto settings = readCameraSettings();
-        camera.Width.SetValue(settings.width);
-        camera.Height.SetValue(settings.height);
-        camera.ExposureAuto.SetValue(Basler_UniversalCameraParams::ExposureAuto_Off);
-        camera.ExposureTime.SetValue(settings.exposureUs);
-        if (camera.AcquisitionFrameRateEnable.IsWritable()) camera.AcquisitionFrameRateEnable.SetValue(false);
-        const cv::Size frameSize(static_cast<int>(camera.Width.GetValue()), static_cast<int>(camera.Height.GetValue()));
-        YoloHandTracker detector(readYoloSettings(frameSize));
-        requireDetector(detector);
-        Pylon::CImageFormatConverter converter;
-        converter.OutputPixelFormat = Pylon::PixelType_BGR8packed;
-        converter.OutputBitAlignment = Pylon::OutputBitAlignment_MsbAligned;
-        Pylon::CPylonImage image;
-        camera.StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
-        cv::namedWindow("MoleGame camera preview", cv::WINDOW_NORMAL);
-        cv::resizeWindow("MoleGame camera preview", frameSize.width, frameSize.height);
-        std::uint64_t sequence = 0;
-        auto nextLog = std::chrono::steady_clock::now();
-        std::cout << "Camera: " << camera.GetDeviceInfo().GetModelName()
-                  << "; raw hand preview, no mole judgment or calibration. ESC exits.\n";
-        while (camera.IsGrabbing()) {
-            if (cv::getWindowProperty("MoleGame camera preview", cv::WND_PROP_VISIBLE) < 1) break;
-            Pylon::CGrabResultPtr grab;
-            if (camera.RetrieveResult(100, grab, Pylon::TimeoutHandling_Return) && grab->GrabSucceeded()) {
-                converter.Convert(image, grab);
-                cv::Mat frame(static_cast<int>(grab->GetHeight()), static_cast<int>(grab->GetWidth()),
-                              CV_8UC3, image.GetBuffer());
-                frame = frame.clone();
-                const auto capturedAt = std::chrono::steady_clock::now();
-                ++sequence;
-                YoloHandDetection detection;
-                detector.detect(frame, detection);
-                if (!detector.lastError().empty()) throw std::runtime_error(detector.lastError());
-                for (const auto& hand : detection.boxes) {
-                    cv::rectangle(frame, hand.box, cv::Scalar(0, 220, 0), 2);
-                    cv::circle(frame, hand.center, 5, cv::Scalar(0, 220, 255), -1);
-                }
-                cv::putText(frame, "Hand preview only | ESC: exit", {12, 28},
-                            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 220, 255), 2);
-                cv::imshow("MoleGame camera preview", frame);
-                const auto now = std::chrono::steady_clock::now();
-                if (now >= nextLog) {
-                    std::cout << "[Preview] frame=" << sequence << " hands=" << detection.boxes.size()
-                              << " detector_total_ms=" << detector.lastPerformance().totalMs
-                              << " capture_to_preview_submit_ms="
-                              << std::chrono::duration<double, std::milli>(now - capturedAt).count() << '\n';
-                    nextLog = now + std::chrono::seconds(1);
-                }
+        CameraInput camera;
+        const std::string window = "MoleGame camera preview";
+        cv::namedWindow(window, cv::WINDOW_NORMAL);
+        cv::resizeWindow(window, camera.frameSize().width, camera.frameSize().height);
+        auto nextLog = HandObservation::Clock::now();
+        std::cout << "Camera serial: " << camera.deviceId() << "; raw hand preview. ESC exits.\n";
+        for (;;) {
+            CameraUpdate update;
+            camera.poll(update);
+            if (!update.preview.empty()) cv::imshow(window, update.preview);
+            const auto now = HandObservation::Clock::now();
+            if (!update.observations.empty() && now >= nextLog) {
+                const auto& sample = update.observations.back();
+                std::cout << "[Preview] frame=" << sample.sequence << " hands=" << sample.centers.size()
+                          << " detector_total_ms=" << sample.detectorMs
+                          << " capture_to_preview_submit_ms="
+                          << std::chrono::duration<double, std::milli>(now - sample.capturedAt).count()
+                          << " dropped=" << update.dropped << '\n';
+                nextLog = now + std::chrono::seconds(1);
             }
-            if (cv::waitKeyEx(1) == 27) break;
+            if (cv::waitKeyEx(1) == 27 || cv::getWindowProperty(window, cv::WND_PROP_VISIBLE) < 1) break;
         }
-        camera.StopGrabbing();
-        camera.Close();
         cv::destroyAllWindows();
         return 0;
-    } catch (const GenICam::GenericException& error) {
-        std::cerr << "Camera preview failed: " << error.GetDescription() << '\n';
-        cv::destroyAllWindows();
-        return 1;
     } catch (const std::exception& error) {
         std::cerr << "Camera preview failed: " << error.what() << '\n';
         cv::destroyAllWindows();
@@ -165,6 +258,12 @@ int runCameraPreview() {
     }
 }
 #else
+struct CameraInput::Impl {};
+CameraInput::CameraInput() { throw std::runtime_error("Camera input unavailable: build with MOLE_WITH_CAMERA=ON"); }
+CameraInput::~CameraInput() = default;
+cv::Size CameraInput::frameSize() const { return {}; }
+const std::string& CameraInput::deviceId() const { static const std::string empty; return empty; }
+void CameraInput::poll(CameraUpdate&) { throw std::runtime_error("Camera input unavailable"); }
 int runCameraPreview() {
     std::cerr << "Camera preview is unavailable: build with MOLE_WITH_CAMERA=ON.\n";
     return 1;

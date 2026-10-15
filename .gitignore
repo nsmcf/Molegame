@@ -1,6 +1,8 @@
 /build/
 /outputs/
 /config/local.json
+/config/camera-calibration.yml
+/config/camera-calibration.yml.bak
 /models/*.onnx
 /models/*.engine
 *.user

@@ -1,13 +1,15 @@
 %YAML:1.0
 ---
-# 鼠标预览参数；不是正式实验条件。
+# 鼠标预览和内部计时原型参数；不是正式实验条件。
 width: 960
 height: 720
 hit_radius: 85
 # 显示时长：50～10000 ms；上下键只修改后续试次。
 display_ms: 500
 # 随机等待：最小 100 ms，最大不超过 60000 ms。
-wait_min_ms: 800
-wait_max_ms: 1800
+wait_min_ms: 1000
+wait_max_ms: 5000
 # 每次击打或超时后的反馈时长：100～10000 ms。
 feedback_ms: 600
+# 相机输入最大间隔/延迟，以及显示结束后等待在途结果的上限。
+input_timeout_ms: 200

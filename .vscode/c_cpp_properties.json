@@ -3,7 +3,10 @@
   "configurations": [
     {
       "name": "Windows",
-      "compileCommands": "${workspaceFolder}/build/camera-release/compile_commands.json",
+      "compileCommands": [
+        "${workspaceFolder}/build/camera-release/compile_commands.json",
+        "${workspaceFolder}/build/mouse-release/compile_commands.json"
+      ],
       "cppStandard": "c++20"
     }
   ]

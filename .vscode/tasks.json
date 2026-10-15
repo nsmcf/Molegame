@@ -2,6 +2,14 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Build MoleGame Practice",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/build.ps1", "-Practice"],
+      "problemMatcher": "$msCompile",
+      "group": "build"
+    },
+    {
       "label": "Build MoleGame Release",
       "type": "process",
       "command": "powershell.exe",

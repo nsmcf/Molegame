@@ -28,6 +28,19 @@ target_compile_options(MoleGame PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/EHsc>
     $<$<CXX_COMPILER_ID:MSVC>:/permissive->)
 
+# 独立练习入口：按需构建，复用 OpenCV。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/practice.cpp")
+    add_executable(MolePractice EXCLUDE_FROM_ALL practice.cpp)
+    target_include_directories(MolePractice PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(MolePractice PRIVATE ${OpenCV_LIBS})
+    target_compile_options(MolePractice PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
+        $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
+    if(WIN32)
+        target_compile_definitions(MolePractice PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+endif()
+
 if(MOLE_WITH_CAMERA)
     if(NOT WIN32)
         message(FATAL_ERROR "Basler preview currently targets Windows; use -DMOLE_WITH_CAMERA=OFF otherwise.")
@@ -45,4 +58,17 @@ if(MOLE_WITH_CAMERA)
         target_include_directories(MoleGame PRIVATE "${TENSORRT_INCLUDE_DIR}")
         target_link_libraries(MoleGame PRIVATE "${TENSORRT_LIBRARY}" CUDA::cudart CUDA::cuda_driver CUDA::nvrtc)
     endif()
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    # 使用无相机实现进行确定性的计时/标定测试，不连接设备或加载模型。
+    add_executable(MoleGameTests EXCLUDE_FROM_ALL tests/GameTests.cpp src/Game.cpp src/CameraInput.cpp)
+    target_include_directories(MoleGameTests PRIVATE src ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(MoleGameTests PRIVATE ${OpenCV_LIBS})
+    target_compile_definitions(MoleGameTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(MoleGameTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
+        $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
+    add_test(NAME InternalTimingAndCalibration COMMAND MoleGameTests)
 endif()

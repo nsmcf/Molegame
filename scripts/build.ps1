@@ -3,9 +3,25 @@ param(
     [switch] $NoCamera,
     [switch] $Run,
     [switch] $CameraPreview,
+    [switch] $CameraGame,
+    [switch] $Practice,
+    [switch] $Test,
     [string] $CheckModel = ''
 )
 $ErrorActionPreference = 'Stop'
+if ($Test -and ($Practice -or $CameraPreview -or $CameraGame -or $CheckModel -or $Run)) {
+    throw 'Test must be run separately from interactive modes.'
+}
+if ($Practice -and ($CameraPreview -or $CameraGame -or $CheckModel)) {
+    throw 'Practice cannot be combined with camera or model-check modes.'
+}
+if (([int]$CameraPreview.IsPresent + [int]$CameraGame.IsPresent + [int][bool]$CheckModel) -gt 1) {
+    throw 'Choose only one camera or model-check mode.'
+}
+if ($NoCamera -and ($CameraPreview -or $CameraGame -or $CheckModel)) {
+    throw 'Camera and model-check modes require a camera-enabled build.'
+}
+$withoutCamera = $NoCamera -or $Practice -or $Test
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $localPath = Join-Path $projectRoot 'config/local.json'
 if (-not (Test-Path -LiteralPath $localPath)) {
@@ -44,13 +60,14 @@ foreach ($pair in @(
 }
 $env:PATH = ($runtimePaths -join ';') + ';' + $env:PATH
 if ($settings.cuda_root) { $env:CUDA_PATH = $settings.cuda_root }
-$variant = if ($NoCamera) { 'mouse' } else { 'camera' }
+$variant = if ($withoutCamera) { 'mouse' } else { 'camera' }
 $buildDirectory = Join-Path $projectRoot "build/$variant-$($Configuration.ToLowerInvariant())"
-$cameraEnabled = if ($NoCamera) { 'OFF' } else { 'ON' }
+$cameraEnabled = if ($withoutCamera) { 'OFF' } else { 'ON' }
 $arguments = @('-S', $projectRoot, '-B', $buildDirectory, '-G', 'Ninja',
     "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_BUILD_TYPE=$Configuration",
     "-DOpenCV_DIR=$($settings.opencv_root)/build", "-DMOLE_WITH_CAMERA=$cameraEnabled")
-if (-not $NoCamera) {
+if ($Test) { $arguments += '-DBUILD_TESTING=ON' }
+if (-not $withoutCamera) {
     $arguments += @("-DBASLER_ROOT=$($settings.basler_root)",
         "-DCUDAToolkit_ROOT=$($settings.cuda_root)", "-DTENSORRT_ROOT=$($settings.tensorrt_root)")
 }
@@ -58,15 +75,22 @@ Push-Location $projectRoot
 try {
     & $cmake @arguments
     if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
-    & $cmake --build $buildDirectory --parallel 4
+    $target = if ($Test) { 'MoleGameTests' } elseif ($Practice) { 'MolePractice' } else { 'MoleGame' }
+    & $cmake --build $buildDirectory --target $target --parallel 4
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
-    $executable = Join-Path $buildDirectory 'MoleGame.exe'
+    if ($Test) {
+        $ctest = Join-Path (Split-Path $cmake -Parent) 'ctest.exe'
+        & $ctest --test-dir $buildDirectory --output-on-failure
+        if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+    }
+    $executable = Join-Path $buildDirectory "$target.exe"
     Write-Host "Ready: $executable"
-    if ($Run -or $CameraPreview -or $CheckModel) {
+    if ($Run -or $CameraPreview -or $CameraGame -or $CheckModel) {
         if ($CameraPreview) { & $executable --camera-preview }
+        elseif ($CameraGame) { & $executable --camera-game }
         elseif ($CheckModel) { & $executable --check-model $CheckModel }
         else { & $executable }
-        if ($LASTEXITCODE -ne 0) { throw "MoleGame exited with code $LASTEXITCODE" }
+        if ($LASTEXITCODE -ne 0) { throw "$target exited with code $LASTEXITCODE" }
     }
 } finally {
     Pop-Location
