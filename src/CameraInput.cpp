@@ -1,13 +1,16 @@
 #include "CameraInput.h"
 #include <iostream>
 #include <utility>
+#include <algorithm>
 #include <opencv2/imgproc.hpp>
 #include <cmath>
 #include <stdexcept>
 
 std::vector<cv::Point2f> calibrationTargets(cv::Size size) {
-    const float x = size.width * 0.1f, y = size.height * 0.15f;
-    return {{x, y}, {size.width - x, y}, {size.width - x, size.height - y}, {x, size.height - y}};
+    // 围绕击打中心取中间一半的区域，减少相机画面边缘畸变的影响。
+    const float cx = size.width * 0.5f, cy = size.height * 0.5f + 30;
+    const float dx = size.width * 0.25f, dy = size.height * 0.25f;
+    return {{cx - dx, cy - dy}, {cx + dx, cy - dy}, {cx + dx, cy + dy}, {cx - dx, cy + dy}};
 }
 
 cv::Mat cameraToGameTransform(const std::vector<cv::Point2f>& corners,
@@ -28,6 +31,43 @@ cv::Mat cameraToGameTransform(const std::vector<cv::Point2f>& corners,
     if (!cv::checkRange(transform) || std::abs(cv::determinant(transform)) < 1e-10)
         throw std::runtime_error("Degenerate calibration");
     return transform;
+}
+
+std::vector<cv::Point2f> moleRegionInCamera(const cv::Mat& transform, cv::Size gameSize, int hitRadius) {
+    if (transform.empty()) return {};
+    std::vector<cv::Point2f> disk, region;
+    for (int i = 0; i < 24; ++i) {
+        const double angle = i * 2 * CV_PI / 24;
+        disk.emplace_back(gameSize.width / 2.f + hitRadius * 0.70f * static_cast<float>(std::cos(angle)),
+            gameSize.height / 2.f + 30 + hitRadius * 0.70f * static_cast<float>(std::sin(angle)));
+    }
+    cv::perspectiveTransform(disk, region, transform.inv());
+    return region;
+}
+
+std::vector<cv::Rect> moleStateMarkers(cv::Size size, int hitRadius) {
+    const int side = std::clamp(hitRadius, 40, std::min(size.width, size.height) / 8);
+    const cv::Point center(size.width / 2, size.height / 2 + 30);
+    const int offset = std::min(3 * hitRadius, size.width / 2 - side / 2 - 20);
+    return {{center.x - offset - side / 2, center.y - side / 2, side, side},
+            {center.x + offset - side / 2, center.y - side / 2, side, side}};
+}
+
+std::vector<std::vector<cv::Point2f>> moleObservationRegionsInCamera(
+    const cv::Mat& transform, cv::Size gameSize, int hitRadius, bool stateMarkers) {
+    if (transform.empty()) return {};
+    if (!stateMarkers) return {moleRegionInCamera(transform, gameSize, hitRadius)};
+    std::vector<std::vector<cv::Point2f>> regions;
+    for (const auto& rect : moleStateMarkers(gameSize, hitRadius)) {
+        std::vector<cv::Point2f> corners{{static_cast<float>(rect.x), static_cast<float>(rect.y)},
+            {static_cast<float>(rect.x + rect.width - 1), static_cast<float>(rect.y)},
+            {static_cast<float>(rect.x + rect.width - 1), static_cast<float>(rect.y + rect.height - 1)},
+            {static_cast<float>(rect.x), static_cast<float>(rect.y + rect.height - 1)}};
+        std::vector<cv::Point2f> mapped;
+        cv::perspectiveTransform(corners, mapped, transform.inv());
+        regions.push_back(std::move(mapped));
+    }
+    return regions;
 }
 
 #ifdef MOLE_WITH_CAMERA
@@ -111,16 +151,20 @@ struct CameraInput::Impl {
     std::string serial;
     std::mutex mutex;
     cv::Mat preview;
+    cv::Mat rawPreview;
+    HandObservation previewSample;
     std::vector<HandObservation> pending;
     std::size_t dropped = 0;
     std::exception_ptr failure;
+    std::vector<std::vector<cv::Point2f>> moleRegions;
+    std::uint64_t regionRevision = 0;
     // 最后声明，确保销毁时先停止并等待线程，再释放共享数据。
     std::jthread worker;
 
-    Impl() {
+    explicit Impl(bool enableMole) {
         std::promise<void> ready;
         auto initialized = ready.get_future();
-        worker = std::jthread([this, signal = std::move(ready)](std::stop_token stop) mutable {
+        worker = std::jthread([this, enableMole, signal = std::move(ready)](std::stop_token stop) mutable {
             bool started = false;
             const auto fail = [&](std::exception_ptr error) {
                 { std::lock_guard lock(mutex); failure = error; }
@@ -140,6 +184,7 @@ struct CameraInput::Impl {
                 serial = camera.GetDeviceInfo().GetSerialNumber().c_str();
                 YoloHandTracker detector(readYoloSettings(size));
                 requireDetector(detector);
+                const auto moleSettings = enableMole ? loadMoleDetectorConfig() : MoleDetectorConfig{};
                 Pylon::CImageFormatConverter converter;
                 converter.OutputPixelFormat = Pylon::PixelType_BGR8packed;
                 converter.OutputBitAlignment = Pylon::OutputBitAlignment_MsbAligned;
@@ -163,14 +208,29 @@ struct CameraInput::Impl {
                     observation.sequence = ++sequence;
                     observation.capturedAt = HandObservation::Clock::now();
                     lastFrameAt = observation.capturedAt;
+                    std::vector<std::vector<cv::Point2f>> regions;
+                    {
+                        std::lock_guard lock(mutex);
+                        regions = moleRegions;
+                        observation.regionRevision = regionRevision;
+                    }
                     YoloHandDetection detection;
                     detector.detect(frame, detection);
                     if (!detector.lastError().empty()) throw std::runtime_error(detector.lastError());
-                    observation.completedAt = HandObservation::Clock::now();
                     observation.detectorMs = detector.lastPerformance().totalMs;
                     for (const auto& hand : detection.boxes) {
                         observation.centers.emplace_back(hand.center);
+                        observation.boxes.push_back(hand.box);
+                    }
+                    // 两种检测使用同一张未绘制调试标记的图像。
+                    if (enableMole) observation.mole = observeMoleRegions(frame, regions, observation.boxes, moleSettings);
+                    observation.completedAt = HandObservation::Clock::now();
+                    cv::Mat raw = frame.clone();
+                    for (const auto& hand : detection.boxes) {
                         cv::rectangle(frame, hand.box, cv::Scalar(0, 220, 0), 2);
+                        cv::putText(frame, "hand " + std::to_string(hand.confidence).substr(0, 4),
+                            {hand.box.x, std::max(12, hand.box.y - 4)}, cv::FONT_HERSHEY_SIMPLEX,
+                            0.45, cv::Scalar(0, 220, 0), 1);
                         cv::circle(frame, hand.center, 5, cv::Scalar(0, 220, 255), -1);
                     }
                     std::lock_guard lock(mutex);
@@ -178,7 +238,9 @@ struct CameraInput::Impl {
                         dropped += pending.size();
                         pending.clear();
                     }
+                    previewSample = observation;
                     pending.push_back(std::move(observation));
+                    rawPreview = std::move(raw);
                     preview = std::move(frame);
                 }
                 camera.StopGrabbing();
@@ -191,32 +253,57 @@ struct CameraInput::Impl {
     }
 };
 
-CameraInput::CameraInput() : impl_(std::make_unique<Impl>()) {}
+CameraInput::CameraInput(bool observeMole) : impl_(std::make_unique<Impl>(observeMole)) {}
 CameraInput::~CameraInput() = default;
 cv::Size CameraInput::frameSize() const { return impl_->size; }
 const std::string& CameraInput::deviceId() const { return impl_->serial; }
+std::uint64_t CameraInput::setMoleRegions(const std::vector<std::vector<cv::Point2f>>& regions) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->moleRegions = regions;
+    return ++impl_->regionRevision;
+}
 void CameraInput::poll(CameraUpdate& update) {
     std::lock_guard lock(impl_->mutex);
     if (impl_->failure) std::rethrow_exception(impl_->failure);
     update.preview = impl_->preview;
+    update.rawPreview = impl_->rawPreview;
+    update.previewSample = impl_->previewSample;
     update.observations.clear();
     update.observations.swap(impl_->pending);
     update.dropped = std::exchange(impl_->dropped, 0);
 }
 
-// 仅检查迁移模型，不连接相机或打开窗口。
+// 离线诊断原图、灰度和局部对比度；仅本次检查降低候选门槛，不改变游戏设置。
 int checkHandModel(const std::string& imagePath) {
     try {
         const cv::Mat frame = cv::imread(imagePath);
         if (frame.empty()) throw std::runtime_error("Cannot read model-check image: " + imagePath);
-        YoloHandTracker detector(readYoloSettings(frame.size()));
+        auto settings = readYoloSettings(frame.size());
+        const float configuredThreshold = settings.confidenceThreshold;
+        settings.confidenceThreshold = std::min(configuredThreshold, 0.05f);
+        YoloHandTracker detector(settings);
         requireDetector(detector);
-        YoloHandDetection detection;
-        detector.detect(frame, detection);
-        if (!detector.lastError().empty()) throw std::runtime_error(detector.lastError());
-        std::cout << "Model check OK: frame=" << frame.cols << 'x' << frame.rows
-                  << ", hands=" << detection.boxes.size()
-                  << ", detector_total_ms=" << detector.lastPerformance().totalMs << std::endl;
+        cv::Mat gray, grayBgr, contrast, contrastBgr;
+        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+        cv::cvtColor(gray, grayBgr, cv::COLOR_GRAY2BGR);
+        cv::createCLAHE(2.0)->apply(gray, contrast);
+        cv::cvtColor(contrast, contrastBgr, cv::COLOR_GRAY2BGR);
+        for (const auto& [name, input] : std::vector<std::pair<const char*, cv::Mat>>{
+                {"raw", frame}, {"gray", grayBgr}, {"gray_clahe", contrastBgr}}) {
+            YoloHandDetection detection;
+            detector.detect(input, detection);
+            if (!detector.lastError().empty()) throw std::runtime_error(detector.lastError());
+            const auto accepted = std::count_if(detection.boxes.begin(), detection.boxes.end(),
+                [&](const auto& hand) { return hand.confidence >= configuredThreshold; });
+            std::cout << "Model check OK: variant=" << name << ", frame=" << frame.cols << 'x' << frame.rows
+                      << ", hands=" << accepted << ", configured_threshold=" << configuredThreshold
+                      << ", candidate_threshold=" << settings.confidenceThreshold
+                      << ", candidates=" << detection.boxes.size()
+                      << ", detector_total_ms=" << detector.lastPerformance().totalMs << '\n';
+            for (const auto& hand : detection.boxes)
+                std::cout << "  candidate confidence=" << hand.confidence << " box=" << hand.box
+                          << " accepted=" << (hand.confidence >= configuredThreshold) << '\n';
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
@@ -259,11 +346,12 @@ int runCameraPreview() {
 }
 #else
 struct CameraInput::Impl {};
-CameraInput::CameraInput() { throw std::runtime_error("Camera input unavailable: build with MOLE_WITH_CAMERA=ON"); }
+CameraInput::CameraInput(bool) { throw std::runtime_error("Camera input unavailable: build with MOLE_WITH_CAMERA=ON"); }
 CameraInput::~CameraInput() = default;
 cv::Size CameraInput::frameSize() const { return {}; }
 const std::string& CameraInput::deviceId() const { static const std::string empty; return empty; }
 void CameraInput::poll(CameraUpdate&) { throw std::runtime_error("Camera input unavailable"); }
+std::uint64_t CameraInput::setMoleRegions(const std::vector<std::vector<cv::Point2f>>&) { return 0; }
 int runCameraPreview() {
     std::cerr << "Camera preview is unavailable: build with MOLE_WITH_CAMERA=ON.\n";
     return 1;

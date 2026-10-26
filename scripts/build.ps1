@@ -4,21 +4,23 @@ param(
     [switch] $Run,
     [switch] $CameraPreview,
     [switch] $CameraGame,
+    [switch] $ObservedGame,
+    [switch] $ObserveMole,
     [switch] $Practice,
     [switch] $Test,
     [string] $CheckModel = ''
 )
 $ErrorActionPreference = 'Stop'
-if ($Test -and ($Practice -or $CameraPreview -or $CameraGame -or $CheckModel -or $Run)) {
+if ($Test -and ($Practice -or $CameraPreview -or $CameraGame -or $ObservedGame -or $ObserveMole -or $CheckModel -or $Run)) {
     throw 'Test must be run separately from interactive modes.'
 }
-if ($Practice -and ($CameraPreview -or $CameraGame -or $CheckModel)) {
+if ($Practice -and ($CameraPreview -or $CameraGame -or $ObservedGame -or $ObserveMole -or $CheckModel)) {
     throw 'Practice cannot be combined with camera or model-check modes.'
 }
-if (([int]$CameraPreview.IsPresent + [int]$CameraGame.IsPresent + [int][bool]$CheckModel) -gt 1) {
+if (([int]$CameraPreview.IsPresent + [int]$CameraGame.IsPresent + [int]$ObservedGame.IsPresent + [int]$ObserveMole.IsPresent + [int][bool]$CheckModel) -gt 1) {
     throw 'Choose only one camera or model-check mode.'
 }
-if ($NoCamera -and ($CameraPreview -or $CameraGame -or $CheckModel)) {
+if ($NoCamera -and ($CameraPreview -or $CameraGame -or $ObservedGame -or $ObserveMole -or $CheckModel)) {
     throw 'Camera and model-check modes require a camera-enabled build.'
 }
 $withoutCamera = $NoCamera -or $Practice -or $Test
@@ -85,9 +87,11 @@ try {
     }
     $executable = Join-Path $buildDirectory "$target.exe"
     Write-Host "Ready: $executable"
-    if ($Run -or $CameraPreview -or $CameraGame -or $CheckModel) {
+    if ($Run -or $CameraPreview -or $CameraGame -or $ObservedGame -or $ObserveMole -or $CheckModel) {
         if ($CameraPreview) { & $executable --camera-preview }
         elseif ($CameraGame) { & $executable --camera-game }
+        elseif ($ObservedGame) { & $executable --camera-observed-game }
+        elseif ($ObserveMole) { & $executable --observe-mole }
         elseif ($CheckModel) { & $executable --check-model $CheckModel }
         else { & $executable }
         if ($LASTEXITCODE -ne 0) { throw "$target exited with code $LASTEXITCODE" }

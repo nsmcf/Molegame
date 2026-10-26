@@ -1,0 +1,13 @@
+%YAML:1.0
+---
+# OpenCV HSV 范围；初始候选值，须用真实投影的 ON/OFF/遮挡画面验证。
+hue_min: 10
+hue_max: 45
+saturation_min: 90
+value_min: 70
+# 可用区域中黄色像素的比例；中间区间保留 UNKNOWN。
+visible_ratio: 0.20
+absent_ratio: 0.02
+# 同帧 YOLO 手框扩展后从区域中排除；可用面积不足则 UNKNOWN。
+min_unoccluded_ratio: 0.30
+hand_margin: 6
