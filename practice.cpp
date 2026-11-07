@@ -1,88 +1,118 @@
-#include <opencv2/highgui.hpp>
+﻿#include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include <algorithm>
 #include <string>
+#include <cmath>
 
-// 取时间的工具已准备好：返回一个持续增长的毫秒数，用两个读数相减计算经过的时间。
-double currentTimeMs() {
-    return static_cast<double>(cv::getTickCount()) * 1000.0 / cv::getTickFrequency();
+//将num限制在min和max之间
+double limitValue(double num, double min, double max) {
+    return std::min(max, std::max(num, min));
 }
 
-// 鼠标位置读取工具：OpenCV 收到鼠标事件时，更新我们传入的坐标。
-// 这部分已准备好，本轮只需要使用 main 中 mouse.x 和 mouse.y 的值。
-void recordMouse(int, int x, int y, int, void* userdata) {
-    cv::Point* position = static_cast<cv::Point*>(userdata);
-    position->x = x;
-    position->y = y;
+//判断point点是否在center为圆心radius为半径的圆中
+bool isInsideCircle(cv::Point point, cv::Point center, int radius) {
+    if(std::pow(point.x - center.x, 2) + std::pow(point.y - center.y, 2) <= std::pow(radius, 2)) return true;
+    else return false;
 }
 
-// 今日练习：判断鼠标点是否在圆内。只补全一处 TODO。
-// 灰色圆周表示判定区域；空格控制黄色圆显示一秒，A/D 调整半径。
+//调取当前时间点
+double currentTimeSeconds() {
+    return cv::getTickCount() / cv::getTickFrequency();
+}
+
 int main() {
-    const std::string windowName = "MoleGame practice";
-    int radius = 80;  // 放在循环外，保存按键修改后的值。
-    int cnt = 0;    //进入圆内部的次数
-    bool visible = false;  // true 表示显示，false 表示隐藏；同样需要跨循环保存。
-    double startedAtMs = 0.0;  // 保存本次显示的开始时间，double 可以保存小数。
-    const cv::Point center{320, 260};  // 圆心的 x、y 坐标。
-    cv::Point mouse{-1, -1};  // -1 表示暂时还没有收到鼠标位置。
-    cv::namedWindow(windowName, cv::WINDOW_AUTOSIZE);
-    cv::setMouseCallback(windowName, recordMouse, &mouse);
+    // 创建一个窗口，等待按键后退出。
+    cv::namedWindow("Practice");
 
-    for (;;) {
-        // 上次完成的自动隐藏逻辑。
-        if (visible == true) {
-            const double nowMs = currentTimeMs();
-            if (nowMs >= startedAtMs + 1000) visible = false;
+    int width = 540;
+    int height = 360;
+    int radius = 50;
+    
+    bool inside = true;
+    int cnt = 0;
+
+    bool filled = false;
+    cv::Point center(width / 2, height / 2);
+    cv::Point blueCenter(width / 2, height / 2);
+
+    const int font = cv::FONT_HERSHEY_SIMPLEX;  // 字体
+    const double fontScale = 0.7;  // 字体缩放比例
+    const double textThickness = 1;  // 文字线宽
+
+    double startTime = currentTimeSeconds();
+    double passTime = 0;  //记录循环时间
+
+    bool paused = false;
+    double pausedAt = startTime;
+    double pausedTime = 0;
+
+    // 创建图像并显示
+    while(true) {
+        cv::Mat image(height, width, CV_8UC3, cv::Scalar(0, 255, 255));
+        cv::circle(image, center, radius, cv::Scalar(0, 0, 255), (filled == false) ? 3 : cv::FILLED);
+        cv::circle(image, blueCenter, 4, cv::Scalar(255, 0, 0), cv::FILLED);
+    
+        if(!paused) {
+            passTime = currentTimeSeconds() - startTime - pausedTime;
+            pausedAt = currentTimeSeconds();
         }
+        else pausedTime = currentTimeSeconds() - pausedAt;
+        std::string passTimeText = cv::format("%.2f", passTime);
 
-        bool inside = false;  // 每一轮根据最新坐标重新判断。
-        if (mouse.x >= 0 && mouse.y >= 0) {
-            const int dx = mouse.x - center.x;
-            const int dy = mouse.y - center.y;
-            // TODO：用 dx、dy 和 radius 判断是否在圆内，把比较结果赋给 inside。
-            // 提示：圆内的点满足“水平距离的平方 + 垂直距离的平方 <= 半径的平方”。
-            if (dx * dx + dy * dy <= radius * radius) inside = true;
+        bool nowInside = isInsideCircle(blueCenter, center, radius);
+        std::string gameStatus = (passTime >= 10) ? "FINISHED" : "RUNNING";
+        if(!paused) if(inside == false && nowInside == true && passTime < 10) cnt = cnt + 1;
+        inside = nowInside;
+
+        cv::putText(image, 
+            "Radius: " + std::to_string(radius) + "  FILLED: " + std::to_string(filled) + "  isInsideCircle: " + std::to_string(inside), 
+            cv::Point(20, 30), 
+            font, 
+            fontScale, 
+            cv::Scalar(0, 0, 0), 
+            textThickness
+        );
+        cv::putText(image, 
+            "insideCount: " + std::to_string(cnt), 
+            cv::Point(20, 50), 
+            font, 
+            fontScale, 
+            cv::Scalar(0, 0, 0), 
+            textThickness
+        );
+        cv::putText(image, 
+            "passTime: " + passTimeText + "  " +gameStatus, 
+            cv::Point(20, 70), 
+            font, 
+            fontScale, 
+            cv::Scalar(0, 0, 0), 
+            textThickness
+        );
+        cv::imshow("Practice", image);
+
+        int key = cv::waitKey(10);
+        if(key == 'a' || key == 'A') radius = (radius > 20) ? (radius - 10) : 20;
+        if(key == 'd' || key == 'D') radius = (radius < 180) ? (radius + 10) : 180;
+
+        if(key == 'j' || key == 'J') center.x = limitValue(center.x - 10, 0, width - 1);
+        if(key == 'l' || key == 'L') center.x = limitValue(center.x + 10, 0, width - 1);
+        if(key == 'i' || key == 'I') center.y = limitValue(center.y - 10, 0, height - 1);
+        if(key == 'k' || key == 'K') center.y = limitValue(center.y + 10, 0, height - 1);
+
+        if(key == ' ') filled = !filled;
+
+        if(key == 'p' || key == 'P') paused = !paused;
+
+        if(key == 'r' || key == 'R') {
+            center.x = width / 2;
+            center.y = height / 2;
+            radius = 50;
+            filled = false;
+            inside = true;
+            cnt = 0;
+            startTime = currentTimeSeconds();
         }
-
-        // 每轮创建新画布，避免上一次画的圆留在图上。
-        cv::Mat frame(480, 640, CV_8UC3, cv::Scalar(29, 25, 24));
-        // 上次完成的条件绘图：不画圆时，仍然显示新画布并处理按键。
-        if (visible == true) {
-            cv::circle(frame, center, radius, cv::Scalar(0, 200, 255), -1, cv::LINE_AA);
-        }
-        cv::circle(frame, center, radius, cv::Scalar(160, 160, 160), 2, cv::LINE_AA);
-        cv::putText(frame, "Radius: " + std::to_string(radius), {20, 35},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(235, 235, 235), 1);
-        cv::putText(frame, "A/D: size   Space: show for 1 second   Esc: exit", {20, 455},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(235, 235, 235), 1);
-
-        std::string status = "Move mouse into the window";
-        if (mouse.x >= 0 && mouse.y >= 0) {
-            status = "OUTSIDE";
-            if (inside) status = "INSIDE";
-            cv::circle(frame, mouse, 5, cv::Scalar(80, 80, 255), -1, cv::LINE_AA);
-            cv::putText(frame, "Mouse: " + std::to_string(mouse.x) + ", " + std::to_string(mouse.y),
-                        {20, 95}, cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(235, 235, 235), 1);
-        }
-        cv::putText(frame, status, {20, 65}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(235, 235, 235), 1);
-
-        cv::imshow(windowName, frame);
-
-        const int key = cv::waitKeyEx(10);
-        if (key == 27 || cv::getWindowProperty(windowName, cv::WND_PROP_VISIBLE) < 1) break;
-
-        // 上次完成的半径调整逻辑。
-        if (key == 'a' || key == 'A') radius = std::max(20, radius - 10);
-        if (key == 'd' || key == 'D') radius = std::min(180, radius + 10);
-
-        // 上次完成的显示和重新计时逻辑。
-        if (key == ' ') {
-            startedAtMs = currentTimeMs();
-            if (visible == false) visible = true;
-        }
+        if(key == 27) break;
     }
-    cv::destroyAllWindows();
     return 0;
 }

@@ -33,7 +33,8 @@ int main(int argc, char* argv[]) {
                 "Left/Right or [ / ]: target brightness -/+ 10% (10..100%).\n"
                 "Camera game: click projected labels 1,2,3,4 in camera preview, then Enter.\n"
                 "H: recalibrate. Use one hand; missing/ambiguous input may be UNJUDGED.\n"
-                "Observation probe: V toggles mole, A toggles automatic cycling, S saves raw + preview.\n";
+                "Observation probe: V toggles mole, A toggles automatic cycling, S saves raw + preview.\n"
+                "C toggles automatic raw + preview capture every 500 ms into outputs/observation-<id>/.\n";
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--camera-preview") return runCameraPreview();

@@ -9,9 +9,17 @@
 
 ## 开始运行
 
-在 VS Code 中打开 **整个 `D:\project\MoleGame` 文件夹**。按 F5，选择
-`MoleGame mouse preview`；相机测试选择 `MoleGame camera preview`；
-手部内部计时选择 `MoleGame YOLO internal timing`；相机观测评分选择 `MoleGame YOLO camera observation`。
+在 VS Code 中打开 **整个 `D:\project\MoleGame` 文件夹**，在“运行和调试”中选择入口后按 F5：
+
+| 启动项 | 用途 |
+| --- | --- |
+| `MoleGame practice` | 运行独立的 `practice.cpp` 练习 |
+| `MoleGame YOLO internal timing` | 手部内部计时评分 |
+| `MoleGame YOLO camera observation` | 同帧手部与地鼠观测评分 |
+| `MoleGame same-frame observation probe` | 不计分的观测调试，可保存原图 |
+
+两种评分模式目前在启动时选择；切换时先按 Esc 退出，再选择另一启动项并按 F5。
+启动前会自动检查构建，代码没有变化时无需重新编译。
 
 也可以从项目根目录执行：
 
@@ -179,10 +187,19 @@ UNJUDGED 现在会显示具体原因，并写入现有调试事件：
 | V | 手动切换地鼠 ON/OFF，并停止自动循环 |
 | A | 开启/停止自动循环；ON 时长为 `display_ms`，OFF 时长为随机等待时间 |
 | S | 每次保存同一帧的两张图（原图、检测预览），并刷新日志 |
+| C | 开启/停止自动采图，每 0.5 秒保存一组原图和检测预览，默认关闭 |
 | H / F / Esc | 重新标定 / 全屏切换并重新标定 / 退出 |
 | R | 切换原方向 / 180° 对面观看，停止自动循环并重新标定 |
 | ↑ / ↓ | 调整后续 ON 时长 50 ms |
 | ← / → 或 [ / ] | 立即调整地鼠亮度，每次 10%，画面显示 Brightness 百分比 |
+
+采集训练图片时，先按 V 保持地鼠显示，再按 C 开启自动采图，此时可以持续移动手；
+再次按 C 停止。S 仍可随时手动保存，V 只控制地鼠显示，不负责截图。
+自动和手动采图均写入项目下同一个 `outputs/observation-<会话编号>/` 目录，
+每组包含 `*-raw.png` 原图和 `*-preview.png` 检测预览，训练标注只使用原图。
+相机预览显示自动采图状态和本次已保存组数；重新标定期间暂停采集，确认后继续。
+没有新帧、帧过期或标定版本不符时跳过，不重复保存同一帧，也不补拍积压时段。
+YOLO 漏检或没有手时仍可保存，便于收集失败样本和负样本；PNG 写入耗时和相机帧率可能使实际间隔超过 0.5 秒。
 
 先在手动状态完成以下检查，再尝试 500 ms 或更短的自动显示：
 
@@ -220,7 +237,7 @@ HSV 和比例阈值在 `config/mole.yml`，初值未经实机标定；修改后�
 - `observations.csv`：所处理预览帧的编号、采样/接收时间、手数、状态、颜色/可用面积比例、原因，
   YOLO 耗时、地鼠检测耗时和主机采样至接收耗时分别记录。
 - `events.csv`：标定、内部显示提交 ON/OFF、手动/自动操作、截图及退出事件。
-- `frame-<帧号>-raw.png`、`frame-<帧号>-preview.png`：按 S 保存的同帧原图与检测预览。
+- `frame-<帧号>-raw.png`、`frame-<帧号>-preview.png`：按 S 手动或按 C 开启自动采集保存的同帧原图与检测预览。
 - `session.yml`、配置及标定快照：标记本次为 `observation_probe`，评分关闭。
 
 手框、原图和观测结果按同一帧绑定；颜色检测在后台对每个已处理的采样帧执行，

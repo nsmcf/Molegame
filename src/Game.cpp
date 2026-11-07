@@ -15,6 +15,8 @@
 #include <utility>
 
 namespace {
+constexpr auto snapshotInterval = std::chrono::milliseconds(500);
+
 // 不同观看方向下，提示文字按可用宽度缩放，避免裁掉右端。
 void putFittedText(cv::Mat& frame, const std::string& text, cv::Point origin, int font,
                    double scale, cv::Scalar color, int thickness = 1, int lineType = cv::LINE_8) {
@@ -443,6 +445,7 @@ void Game::openLog() {
              << "random_engine" << "mt19937" << "random_seed" << std::to_string(randomSeed_);
     if (observationProbe_)
         metadata << "sampling" << "every_processed_camera_frame"
+                 << "auto_snapshot_interval_ms" << static_cast<int>(snapshotInterval.count())
                  << "scoring" << "disabled"
                  << "mole_region" << (config_.stateMarkers ? "two_side_markers" : "disk_at_hit_center_radius_0.70_times_hit_radius");
     std::cout << "Session: " << sessionDirectory_ << '\n';
@@ -580,10 +583,33 @@ void Game::run() {
     std::vector<std::vector<cv::Point>> molePolygons;
     std::uint64_t lastProbeFrame = 0;
     bool autoCycle = false;
+    bool autoCapture = false;
+    std::uint64_t lastSavedFrame = 0;
+    std::size_t savedSnapshots = 0;
+    auto nextSnapshotAt = Clock::now();
     auto nextProbeSwitch = Clock::now();
     std::optional<bool> lastProbeSubmitted;
     cv::Mat appliedTransform;
     std::uint64_t regionRevision = 0;
+    // 手动与自动共用同帧保存路径；漏检或没有手的原图也需要保留。
+    const auto saveSnapshot = [&](bool automatic) {
+        const auto now = Clock::now();
+        if (calibrating_ || rawPreview.empty() || savedAnnotation.empty() ||
+            lastProbeFrame != previewSample.sequence || previewSample.sequence == lastSavedFrame ||
+            previewSample.regionRevision != regionRevision || previewSample.capturedAt < ignoreBefore_ ||
+            now - previewSample.capturedAt > std::chrono::milliseconds(config_.inputTimeoutMs)) return;
+        const auto prefix = sessionDirectory_ + "/frame-" + std::to_string(previewSample.sequence);
+        if (!cv::imwrite(prefix + "-raw.png", rawPreview) || !cv::imwrite(prefix + "-preview.png", savedAnnotation))
+            throw std::runtime_error("Cannot save observation snapshot");
+        lastSavedFrame = previewSample.sequence;
+        ++savedSnapshots;
+        // 处理慢或暂时没有新帧时不补拍，避免恢复后连续写出一串近似画面。
+        nextSnapshotAt = Clock::now() + snapshotInterval;
+        observations_.flush();
+        logEvent(automatic ? "SNAPSHOT_AUTO" : "SNAPSHOT", now, std::to_string(lastSavedFrame));
+        events_.flush();
+        std::cout << "Saved " << prefix << " (raw + annotated), total=" << savedSnapshots << '\n';
+    };
     for (;;) {
         const auto windowRect = cv::getWindowImageRect(windowName_);
         if (windowRect.width > 0 && windowRect.height > 0) {
@@ -718,11 +744,17 @@ void Game::run() {
                         "Click cross centers 1,2,3,4" : "Check CENTER then press ENTER") : fresh ? mole.reason : "sample_stale_or_region_changed";
                     cv::putText(annotated, hint, {10, 75},
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
-                    savedAnnotation = annotated;
+                }
+                if (observationProbe_) {
+                    const std::string status = !autoCapture ? "OFF" : calibrating_ ? "PAUSED" : "ON";
+                    putFittedText(annotated, "C: auto 0.5s " + status + " | S: save | saved=" +
+                        std::to_string(savedSnapshots), {10, 100}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                        autoCapture ? cv::Scalar(80, 255, 80) : cv::Scalar(235, 235, 235));
                 }
                 cv::putText(annotated, "Brightness setting: " + std::to_string(config_.targetBrightness) +
                     "% | Left/Right: -/+ 10%", {10, annotated.rows - 12},
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(235, 235, 235), 1);
+                if (observationProbe_) savedAnnotation = annotated;
                 cv::imshow(previewName, annotated);
             }
         }
@@ -765,17 +797,19 @@ void Game::run() {
                 autoCycle = !autoCycle;
                 nextProbeSwitch = Clock::now();
                 logEvent("AUTO_CYCLE", Clock::now(), autoCycle ? "ON" : "OFF");
-            } else if ((key == 's' || key == 'S') && !rawPreview.empty() &&
-                       lastProbeFrame == previewSample.sequence && previewSample.capturedAt >= ignoreBefore_) {
-                const auto prefix = sessionDirectory_ + "/frame-" + std::to_string(lastProbeFrame);
-                if (!cv::imwrite(prefix + "-raw.png", rawPreview) || !cv::imwrite(prefix + "-preview.png", savedAnnotation))
-                    throw std::runtime_error("Cannot save observation snapshot");
-                observations_.flush();
-                logEvent("SNAPSHOT", Clock::now(), std::to_string(lastProbeFrame));
+            } else if (key == 'c' || key == 'C') {
+                autoCapture = !autoCapture;
+                nextSnapshotAt = Clock::now() + snapshotInterval;
+                logEvent("AUTO_CAPTURE", Clock::now(), autoCapture ? "ON" : "OFF");
                 events_.flush();
-                std::cout << "Saved " << prefix << " (raw + annotated)\n";
+                std::cout << "Auto capture " << (autoCapture ? "ON (500 ms)" : "OFF")
+                          << ": " << sessionDirectory_ << '\n';
+            } else if (key == 's' || key == 'S') {
+                saveSnapshot(false);
             }
         }
+        if (observationProbe_ && autoCapture && !calibrating_ && Clock::now() >= nextSnapshotAt)
+            saveSnapshot(true);
         if (key == ' ') reset();
         else if (key == 2424832 || key == 65361 || key == '[') adjustTargetBrightness(-10);
         else if (key == 2555904 || key == 65363 || key == ']') adjustTargetBrightness(10);
