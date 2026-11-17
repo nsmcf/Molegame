@@ -65,10 +65,11 @@ if ($settings.cuda_root) { $env:CUDA_PATH = $settings.cuda_root }
 $variant = if ($withoutCamera) { 'mouse' } else { 'camera' }
 $buildDirectory = Join-Path $projectRoot "build/$variant-$($Configuration.ToLowerInvariant())"
 $cameraEnabled = if ($withoutCamera) { 'OFF' } else { 'ON' }
+$testingEnabled = if ($Test) { 'ON' } else { 'OFF' }
 $arguments = @('-S', $projectRoot, '-B', $buildDirectory, '-G', 'Ninja',
     "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_BUILD_TYPE=$Configuration",
-    "-DOpenCV_DIR=$($settings.opencv_root)/build", "-DMOLE_WITH_CAMERA=$cameraEnabled")
-if ($Test) { $arguments += '-DBUILD_TESTING=ON' }
+    "-DOpenCV_DIR=$($settings.opencv_root)/build", "-DMOLE_WITH_CAMERA=$cameraEnabled",
+    "-DBUILD_TESTING=$testingEnabled")
 if (-not $withoutCamera) {
     $arguments += @("-DBASLER_ROOT=$($settings.basler_root)",
         "-DCUDAToolkit_ROOT=$($settings.cuda_root)", "-DTENSORRT_ROOT=$($settings.tensorrt_root)")

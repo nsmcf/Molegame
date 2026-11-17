@@ -53,7 +53,7 @@ int main() {
         cv::circle(image, blueCenter, 4, cv::Scalar(255, 0, 0), cv::FILLED);
     
         if(!paused) {
-            passTime = currentTimeSeconds() - startTime - pausedTime;
+            passTime = currentTimeSeconds() - startTime;
             pausedAt = currentTimeSeconds();
         }
         else pausedTime = currentTimeSeconds() - pausedAt;
@@ -68,7 +68,7 @@ int main() {
             "Radius: " + std::to_string(radius) + "  FILLED: " + std::to_string(filled) + "  isInsideCircle: " + std::to_string(inside), 
             cv::Point(20, 30), 
             font, 
-            fontScale, 
+            fontScale,  
             cv::Scalar(0, 0, 0), 
             textThickness
         );
@@ -101,7 +101,16 @@ int main() {
 
         if(key == ' ') filled = !filled;
 
-        if(key == 'p' || key == 'P') paused = !paused;
+        if((key == 'p' || key == 'P') && passTime < 10) {
+            if(paused == true) {
+                paused = !paused;
+                startTime = startTime + pausedTime;
+                pausedTime = 0;
+            }
+            else {
+                paused = !paused;
+            }
+        };
 
         if(key == 'r' || key == 'R') {
             center.x = width / 2;
@@ -111,6 +120,7 @@ int main() {
             inside = true;
             cnt = 0;
             startTime = currentTimeSeconds();
+            pausedTime = 0;
         }
         if(key == 27) break;
     }

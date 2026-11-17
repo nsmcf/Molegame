@@ -15,7 +15,7 @@ option(MOLE_WITH_TENSORRT "Enable the TensorRT YOLO backend" ON)
 set(BASLER_ROOT "" CACHE PATH "Basler pylon installation")
 set(TENSORRT_ROOT "" CACHE PATH "TensorRT installation")
 
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui calib3d dnn)
 add_executable(MoleGame src/main.cpp src/Game.cpp src/CameraInput.cpp src/vision/MoleDetector.cpp)
 target_include_directories(MoleGame PRIVATE src ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(MoleGame PRIVATE ${OpenCV_LIBS})
@@ -60,9 +60,10 @@ if(MOLE_WITH_CAMERA)
     endif()
 endif()
 
+option(BUILD_TESTING "Build tests only when explicitly requested" OFF)
 include(CTest)
 if(BUILD_TESTING)
-    # 使用无相机实现进行确定性的计时/标定测试，不连接设备或加载模型。
+    # 仅由明确启用 BUILD_TESTING 的手动入口构建。
     add_executable(MoleGameTests EXCLUDE_FROM_ALL tests/GameTests.cpp src/Game.cpp src/CameraInput.cpp src/vision/MoleDetector.cpp)
     target_include_directories(MoleGameTests PRIVATE src ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(MoleGameTests PRIVATE ${OpenCV_LIBS})

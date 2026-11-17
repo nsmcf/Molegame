@@ -5,6 +5,8 @@
 /config/camera-calibration.yml.bak
 /models/*.onnx
 /models/*.engine
+/models/*-deploy/
+/models/*-deploy.zip
 *.user
 *.pdb
 *.obj

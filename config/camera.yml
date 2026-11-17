@@ -3,3 +3,7 @@
 width: 720
 height: 540
 exposure_us: 1500.
+# 试用镜头校正；预览、手检测和地鼠识别共用校正后的画面。
+# 改成 0 可关闭；切换或修改镜头参数后必须重做 H 四点标定。
+undistort: 1
+intrinsics_file: "config/camera-intrinsics-trial.yml"

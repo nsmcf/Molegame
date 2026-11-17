@@ -1,0 +1,20 @@
+%YAML:1.0
+---
+# 2026-11-17 Basler_Pic: 10 views, 9x6 corners, nominal square 25 mm.
+# Trial only: fx=fy, k3=0. Reprojection RMS 0.4733 px; limited edge/pose coverage.
+# Output uses the original camera matrix, matching before-after-valid-view.png.
+image_width: 720
+image_height: 540
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [590.43220053461414, 0., 382.18654673726451,
+          0., 590.43220053461414, 306.73024567853628,
+          0., 0., 1.]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [-0.32220189658516019, 0.038965382580592206,
+          -0.00020658739887481785, -0.008677891141209485, 0.]

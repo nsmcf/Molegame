@@ -3,8 +3,67 @@
 #include <utility>
 #include <algorithm>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
+#include <iomanip>
+#include <sstream>
 #include <cmath>
 #include <stdexcept>
+
+CameraUndistortion::CameraUndistortion(cv::Size size, const std::string& path) : size_(size) {
+    if (size.width <= 0 || size.height <= 0) throw std::runtime_error("Invalid camera image size");
+    if (path.empty()) return;
+    cv::FileStorage file(path, cv::FileStorage::READ);
+    if (!file.isOpened()) throw std::runtime_error("Cannot read camera intrinsics: " + path);
+    int width = 0, height = 0;
+    file["image_width"] >> width; file["image_height"] >> height;
+    if (cv::Size(width, height) != size)
+        throw std::runtime_error("Camera intrinsics resolution differs from capture size");
+    cv::Mat camera, distortion, output;
+    file["camera_matrix"] >> camera;
+    file["distortion_coefficients"] >> distortion;
+    if (!file["output_camera_matrix"].empty()) file["output_camera_matrix"] >> output;
+    const auto matrix = [](cv::Mat& value) {
+        if (value.size() != cv::Size(3, 3) || value.channels() != 1)
+            throw std::runtime_error("Camera matrix must be 3x3");
+        value.convertTo(value, CV_64F);
+        if (!cv::checkRange(value) || value.at<double>(0, 0) <= 0 || value.at<double>(1, 1) <= 0 ||
+            std::abs(value.at<double>(0, 1)) > 1e-9 || std::abs(value.at<double>(1, 0)) > 1e-9 ||
+            std::abs(value.at<double>(2, 0)) > 1e-9 || std::abs(value.at<double>(2, 1)) > 1e-9 ||
+            std::abs(value.at<double>(2, 2) - 1) > 1e-9)
+            throw std::runtime_error("Invalid camera matrix values");
+    };
+    matrix(camera);
+    if (output.empty()) output = camera.clone();
+    matrix(output);
+    const auto count = distortion.total();
+    if (distortion.channels() != 1 || (distortion.rows != 1 && distortion.cols != 1) ||
+        (count != 4 && count != 5 && count != 8 && count != 12 && count != 14))
+        throw std::runtime_error("Invalid camera distortion coefficients");
+    distortion.convertTo(distortion, CV_64F);
+    distortion = distortion.reshape(1, 1);
+    if (!cv::checkRange(distortion)) throw std::runtime_error("Nonfinite camera distortion coefficients");
+    cv::initUndistortRectifyMap(camera, distortion, cv::Mat(), output, size, CV_16SC2, map1_, map2_);
+
+    // 参数变化即更换坐标系标识，旧四点缓存不能仅凭相同分辨率继续复用。
+    std::ostringstream values;
+    values << size.width << 'x' << size.height << std::setprecision(17);
+    for (const auto& value : {camera, distortion, output}) {
+        const auto row = value.reshape(1, 1);
+        for (int i = 0; i < row.cols; ++i) values << '/' << row.at<double>(0, i);
+    }
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char c : values.str()) { hash ^= c; hash *= 1099511628211ull; }
+    coordinateSystem_ = "undistorted-v1-" + std::to_string(hash);
+}
+
+void CameraUndistortion::apply(cv::Mat& frame) const {
+    if (frame.size() != size_ || frame.type() != CV_8UC3)
+        throw std::runtime_error("Unexpected camera frame size or format");
+    if (map1_.empty()) return;
+    cv::Mat corrected;
+    cv::remap(frame, corrected, map1_, map2_, cv::INTER_LINEAR, cv::BORDER_CONSTANT);
+    frame = std::move(corrected);
+}
 
 std::vector<cv::Point2f> calibrationTargets(cv::Size size) {
     // 围绕击打中心取中间一半的区域，减少相机画面边缘畸变的影响。
@@ -90,6 +149,8 @@ struct CameraSettings {
     int width = 720;
     int height = 540;
     double exposureUs = 1500.0;
+    bool undistort = false;
+    std::string intrinsicsFile;
 };
 
 // 读取相机尺寸和曝光，避免无效参数进入采集。
@@ -100,6 +161,14 @@ CameraSettings readCameraSettings() {
     if (!file["width"].empty()) file["width"] >> settings.width;
     if (!file["height"].empty()) file["height"] >> settings.height;
     if (!file["exposure_us"].empty()) file["exposure_us"] >> settings.exposureUs;
+    if (!file["undistort"].empty()) {
+        int enabled = 0; file["undistort"] >> enabled;
+        if (enabled != 0 && enabled != 1) throw std::runtime_error("undistort must be 0 or 1");
+        settings.undistort = enabled != 0;
+    }
+    if (!file["intrinsics_file"].empty()) file["intrinsics_file"] >> settings.intrinsicsFile;
+    if (settings.undistort && settings.intrinsicsFile.empty())
+        throw std::runtime_error("undistort requires intrinsics_file in config/camera.yml");
     if (settings.width <= 0 || settings.height <= 0 ||
         !std::isfinite(settings.exposureUs) || settings.exposureUs <= 0)
         throw std::runtime_error("Camera size and exposure must be positive");
@@ -149,9 +218,11 @@ void requireDetector(YoloHandTracker& detector) {
 struct CameraInput::Impl {
     cv::Size size;
     std::string serial;
+    std::string coordinateSystem = "raw";
     std::mutex mutex;
     cv::Mat preview;
     cv::Mat rawPreview;
+    cv::Mat sensorPreview;
     HandObservation previewSample;
     std::vector<HandObservation> pending;
     std::size_t dropped = 0;
@@ -182,6 +253,10 @@ struct CameraInput::Impl {
                 if (camera.AcquisitionFrameRateEnable.IsWritable()) camera.AcquisitionFrameRateEnable.SetValue(false);
                 size = {static_cast<int>(camera.Width.GetValue()), static_cast<int>(camera.Height.GetValue())};
                 serial = camera.GetDeviceInfo().GetSerialNumber().c_str();
+                CameraUndistortion rectifier(size, settings.undistort ? settings.intrinsicsFile : "");
+                coordinateSystem = rectifier.coordinateSystem();
+                std::cout << "[Camera] Undistortion " << (settings.undistort ? "ON: " : "OFF: ")
+                          << coordinateSystem << '\n';
                 YoloHandTracker detector(readYoloSettings(size));
                 requireDetector(detector);
                 const auto moleSettings = enableMole ? loadMoleDetectorConfig() : MoleDetectorConfig{};
@@ -208,6 +283,9 @@ struct CameraInput::Impl {
                     observation.sequence = ++sequence;
                     observation.capturedAt = HandObservation::Clock::now();
                     lastFrameAt = observation.capturedAt;
+                    // 保留原始采集，再对工作帧去畸变；时间戳仍属于去畸变之前的采集样本。
+                    const cv::Mat sensor = frame;
+                    rectifier.apply(frame);
                     std::vector<std::vector<cv::Point2f>> regions;
                     {
                         std::lock_guard lock(mutex);
@@ -225,7 +303,8 @@ struct CameraInput::Impl {
                     // 两种检测使用同一张未绘制调试标记的图像。
                     if (enableMole) observation.mole = observeMoleRegions(frame, regions, observation.boxes, moleSettings);
                     observation.completedAt = HandObservation::Clock::now();
-                    cv::Mat raw = frame.clone();
+                    cv::Mat raw = frame;
+                    frame = frame.clone();
                     for (const auto& hand : detection.boxes) {
                         cv::rectangle(frame, hand.box, cv::Scalar(0, 220, 0), 2);
                         cv::putText(frame, "hand " + std::to_string(hand.confidence).substr(0, 4),
@@ -241,6 +320,7 @@ struct CameraInput::Impl {
                     previewSample = observation;
                     pending.push_back(std::move(observation));
                     rawPreview = std::move(raw);
+                    sensorPreview = sensor;
                     preview = std::move(frame);
                 }
                 camera.StopGrabbing();
@@ -257,6 +337,7 @@ CameraInput::CameraInput(bool observeMole) : impl_(std::make_unique<Impl>(observ
 CameraInput::~CameraInput() = default;
 cv::Size CameraInput::frameSize() const { return impl_->size; }
 const std::string& CameraInput::deviceId() const { return impl_->serial; }
+const std::string& CameraInput::coordinateSystem() const { return impl_->coordinateSystem; }
 std::uint64_t CameraInput::setMoleRegions(const std::vector<std::vector<cv::Point2f>>& regions) {
     std::lock_guard lock(impl_->mutex);
     impl_->moleRegions = regions;
@@ -267,6 +348,7 @@ void CameraInput::poll(CameraUpdate& update) {
     if (impl_->failure) std::rethrow_exception(impl_->failure);
     update.preview = impl_->preview;
     update.rawPreview = impl_->rawPreview;
+    update.sensorPreview = impl_->sensorPreview;
     update.previewSample = impl_->previewSample;
     update.observations.clear();
     update.observations.swap(impl_->pending);
@@ -315,11 +397,13 @@ int checkHandModel(const std::string& imagePath) {
 int runCameraPreview() {
     try {
         CameraInput camera;
-        const std::string window = "MoleGame camera preview";
+        const std::string window = std::string("MoleGame camera preview") +
+            (camera.coordinateSystem() == "raw" ? "" : " (undistorted)");
         cv::namedWindow(window, cv::WINDOW_NORMAL);
         cv::resizeWindow(window, camera.frameSize().width, camera.frameSize().height);
         auto nextLog = HandObservation::Clock::now();
-        std::cout << "Camera serial: " << camera.deviceId() << "; raw hand preview. ESC exits.\n";
+        std::cout << "Camera serial: " << camera.deviceId() << "; " << camera.coordinateSystem()
+                  << " hand preview. ESC exits.\n";
         for (;;) {
             CameraUpdate update;
             camera.poll(update);
@@ -350,6 +434,7 @@ CameraInput::CameraInput(bool) { throw std::runtime_error("Camera input unavaila
 CameraInput::~CameraInput() = default;
 cv::Size CameraInput::frameSize() const { return {}; }
 const std::string& CameraInput::deviceId() const { static const std::string empty; return empty; }
+const std::string& CameraInput::coordinateSystem() const { static const std::string raw = "raw"; return raw; }
 void CameraInput::poll(CameraUpdate&) { throw std::runtime_error("Camera input unavailable"); }
 std::uint64_t CameraInput::setMoleRegions(const std::vector<std::vector<cv::Point2f>>&) { return 0; }
 int runCameraPreview() {

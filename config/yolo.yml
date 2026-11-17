@@ -1,11 +1,12 @@
 %YAML:1.0
 ---
 backend: tensorrt
-onnx_model: "models/hand_detector.onnx"
-tensorrt_engine: "models/hand_detector.engine"
-tensorrt_fp16_engine: "models/hand_detector_fp16_io.engine"
-tensorrt_fast_engine: "models/hand_detector_416_fp16_io.engine"
-class_names: "models/classes.names"
+# 补充训练模型：本机构建的 416 FP16 引擎；旧配置备份见 outputs/model-deploy-20261110/。
+onnx_model: "models/MoleGame-finetune-20261108-deploy/hand_detector.onnx"
+tensorrt_engine: "models/MoleGame-finetune-20261108-deploy/hand_detector_finetuned_416_fp16_io.engine"
+tensorrt_fp16_engine: "models/MoleGame-finetune-20261108-deploy/hand_detector_finetuned_416_fp16_io.engine"
+tensorrt_fast_engine: "models/MoleGame-finetune-20261108-deploy/hand_detector_finetuned_416_fp16_io.engine"
+class_names: "models/MoleGame-finetune-20261108-deploy/classes.names"
 confidence_threshold: 0.65
 nms_threshold: 0.45
 use_cuda_graph: 1

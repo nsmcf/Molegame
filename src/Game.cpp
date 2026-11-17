@@ -423,6 +423,11 @@ void Game::openLog() {
         fs::copy_file(fs::path("config") / name, fs::path(sessionDirectory_) / name);
     if (fs::exists("config/mole.yml"))
         fs::copy_file("config/mole.yml", fs::path(sessionDirectory_) / "mole.yml");
+    if (cameraCoordinateSystem_ != "raw") {
+        cv::FileStorage cameraSettings("config/camera.yml", cv::FileStorage::READ);
+        std::string intrinsics; cameraSettings["intrinsics_file"] >> intrinsics;
+        fs::copy_file(intrinsics, fs::path(sessionDirectory_) / "camera-intrinsics.yml");
+    }
     if (observationProbe_) {
         observations_.open(sessionDirectory_ + "/observations.csv");
         if (!observations_) throw std::runtime_error("Cannot create observation log");
@@ -435,6 +440,7 @@ void Game::openLog() {
     metadata << "mode" << (observationProbe_ ? "observation_probe" :
         cameraJudgment_ ? "camera_observation" : "internal_timing") << "camera_serial" << cameraId_
              << "camera_size" << cameraSize_ << "game_size" << gameSize() << "output_size" << outputSize()
+             << "camera_coordinate_system" << cameraCoordinateSystem_
              << "output_rotation_ccw" << config_.outputRotationCcw
              << "target_brightness" << config_.targetBrightness
              << "game_points" << calibrationTargets(gameSize())
@@ -493,6 +499,10 @@ void Game::loadCalibration(const std::string& path) {
         if (cameraSize != cameraSize_ || gameSize != this->gameSize() ||
             serial != cameraId_ || rotation != config_.outputRotationCcw)
             throw std::runtime_error("Calibration device, size or output rotation changed");
+        std::string coordinateSystem = "raw";
+        if (!file["camera_coordinate_system"].empty()) file["camera_coordinate_system"] >> coordinateSystem;
+        if (coordinateSystem != cameraCoordinateSystem_)
+            throw std::runtime_error("Camera image correction changed. Click projected labels 1,2,3,4 again");
         const auto targets = calibrationTargets(this->gameSize());
         std::vector<cv::Point2f> savedTargets;
         if (!file["game_points"].empty()) file["game_points"] >> savedTargets;
@@ -519,6 +529,7 @@ void Game::confirmCalibration() {
          << "output_rotation_ccw" << config_.outputRotationCcw
          << "game_points" << calibrationTargets(gameSize())
          << "camera_serial" << cameraId_ << "camera_points" << calibrationCorners_;
+    file << "camera_coordinate_system" << cameraCoordinateSystem_;
     file.release();
     const auto now = Clock::now();
     if (!sessionDirectory_.empty()) {
@@ -559,11 +570,13 @@ cv::Mat Game::renderCalibration() const {
 
 void Game::run() {
     std::unique_ptr<CameraInput> camera;
-    const std::string previewName = "MoleGame camera preview";
+    std::string previewName = "MoleGame camera preview";
     if (useCamera_) {
         camera = std::make_unique<CameraInput>(true);
         cameraSize_ = camera->frameSize();
         cameraId_ = camera->deviceId();
+        cameraCoordinateSystem_ = camera->coordinateSystem();
+        if (cameraCoordinateSystem_ != "raw") previewName += " (undistorted)";
         openLog();
         loadCalibration();
         cv::namedWindow(previewName, cv::WINDOW_NORMAL);
@@ -577,7 +590,7 @@ void Game::run() {
     std::optional<cv::Rect> previousWindowRect;
     auto nextLog = Clock::now();
     cv::Mat preview;
-    cv::Mat rawPreview, savedAnnotation;
+    cv::Mat rawPreview, sensorPreview, savedAnnotation;
     HandObservation previewSample;
     MoleObservation mole;
     std::vector<std::vector<cv::Point>> molePolygons;
@@ -594,13 +607,15 @@ void Game::run() {
     // 手动与自动共用同帧保存路径；漏检或没有手的原图也需要保留。
     const auto saveSnapshot = [&](bool automatic) {
         const auto now = Clock::now();
-        if (calibrating_ || rawPreview.empty() || savedAnnotation.empty() ||
+        if (calibrating_ || rawPreview.empty() || sensorPreview.empty() || savedAnnotation.empty() ||
             lastProbeFrame != previewSample.sequence || previewSample.sequence == lastSavedFrame ||
             previewSample.regionRevision != regionRevision || previewSample.capturedAt < ignoreBefore_ ||
             now - previewSample.capturedAt > std::chrono::milliseconds(config_.inputTimeoutMs)) return;
         const auto prefix = sessionDirectory_ + "/frame-" + std::to_string(previewSample.sequence);
-        if (!cv::imwrite(prefix + "-raw.png", rawPreview) || !cv::imwrite(prefix + "-preview.png", savedAnnotation))
+        if (!cv::imwrite(prefix + "-raw.png", sensorPreview) || !cv::imwrite(prefix + "-preview.png", savedAnnotation))
             throw std::runtime_error("Cannot save observation snapshot");
+        if (cameraCoordinateSystem_ != "raw" && !cv::imwrite(prefix + "-undistorted.png", rawPreview))
+            throw std::runtime_error("Cannot save undistorted observation snapshot");
         lastSavedFrame = previewSample.sequence;
         ++savedSnapshots;
         // 处理慢或暂时没有新帧时不补拍，避免恢复后连续写出一串近似画面。
@@ -608,7 +623,8 @@ void Game::run() {
         observations_.flush();
         logEvent(automatic ? "SNAPSHOT_AUTO" : "SNAPSHOT", now, std::to_string(lastSavedFrame));
         events_.flush();
-        std::cout << "Saved " << prefix << " (raw + annotated), total=" << savedSnapshots << '\n';
+        std::cout << "Saved " << prefix << (cameraCoordinateSystem_ == "raw" ? " (raw + annotated)" :
+            " (sensor raw + undistorted + annotated)") << ", total=" << savedSnapshots << '\n';
     };
     for (;;) {
         const auto windowRect = cv::getWindowImageRect(windowName_);
@@ -694,6 +710,7 @@ void Game::run() {
             if (!batch.preview.empty()) {
                 preview = batch.preview;
                 rawPreview = batch.rawPreview;
+                sensorPreview = batch.sensorPreview;
                 previewSample = batch.previewSample;
                 mole = previewSample.mole;
                 molePolygons.clear();

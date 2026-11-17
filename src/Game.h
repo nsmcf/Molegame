@@ -79,6 +79,7 @@ private:
     bool calibrating_ = false;
     cv::Size cameraSize_;
     std::string cameraId_;
+    std::string cameraCoordinateSystem_ = "raw";
     std::vector<cv::Point2f> calibrationCorners_;
     cv::Mat cameraToGame_;
     std::string calibrationMessage_ = "Click projected labels 1,2,3,4 in the camera window";

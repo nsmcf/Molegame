@@ -21,10 +21,23 @@ struct HandObservation {
 
 struct CameraUpdate {
     cv::Mat preview;
-    cv::Mat rawPreview;
+    cv::Mat rawPreview;    // 无调试绘制的工作画面；启用镜头校正后为去畸变图。
+    cv::Mat sensorPreview; // 同一次采集的原始图，供保存和重新标定镜头使用。
     HandObservation previewSample; // 与两张预览严格对应，不与其他帧的手框混用。
     std::vector<HandObservation> observations;
     std::size_t dropped = 0;
+};
+
+// 启动时预计算映射；输出尺寸不变，所有检测和四点映射使用同一坐标系。
+class CameraUndistortion {
+public:
+    explicit CameraUndistortion(cv::Size size, const std::string& calibrationPath = {});
+    void apply(cv::Mat& frame) const;
+    const std::string& coordinateSystem() const { return coordinateSystem_; }
+private:
+    cv::Size size_;
+    cv::Mat map1_, map2_;
+    std::string coordinateSystem_ = "raw";
 };
 
 // 采集和 YOLO 在后台顺序执行，主线程负责窗口和游戏计时。
@@ -36,6 +49,7 @@ public:
     CameraInput& operator=(const CameraInput&) = delete;
     cv::Size frameSize() const;
     const std::string& deviceId() const;
+    const std::string& coordinateSystem() const;
     void poll(CameraUpdate& update);
     std::uint64_t setMoleRegions(const std::vector<std::vector<cv::Point2f>>& regions);
 private:

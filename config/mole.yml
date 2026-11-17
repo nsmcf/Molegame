@@ -1,6 +1,6 @@
 %YAML:1.0
 ---
-# OpenCV HSV 范围；初始候选值，须用真实投影的 ON/OFF/遮挡画面验证。
+# OpenCV HSV 颜色范围。
 hue_min: 10
 hue_max: 45
 saturation_min: 90

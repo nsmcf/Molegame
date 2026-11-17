@@ -1,6 +1,7 @@
 #include "Game.h"
 #include "CameraInput.h"
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 
 #include <functional>
 #include <cstdlib>
@@ -219,6 +220,106 @@ struct GameTestAccess {
                 const auto expected = calibrationTargets({960, 720});
                 for (int i = 0; i < 4; ++i)
                     require(cv::norm(mapped[i] - expected[i]) < 0.01, "calibration reordered labels");
+            }},
+            {"camera undistortion matches offline image and preserves sensor pixels", [] {
+                const std::string path = "undistortion-offline-test.yml";
+                const cv::Size size(720, 540);
+                const cv::Mat camera = (cv::Mat_<double>(3, 3) <<
+                    590.43220053461414, 0, 382.18654673726451,
+                    0, 590.43220053461414, 306.73024567853628, 0, 0, 1);
+                const cv::Mat distortion = (cv::Mat_<double>(1, 5) <<
+                    -0.32220189658516019, 0.038965382580592206,
+                    -0.00020658739887481785, -0.008677891141209485, 0);
+                const auto write = [&](const std::string& name, const cv::Mat& coefficients) {
+                    cv::FileStorage file(name, cv::FileStorage::WRITE);
+                    file << "image_width" << size.width << "image_height" << size.height
+                         << "camera_matrix" << camera << "distortion_coefficients" << coefficients;
+                };
+                write(path, distortion);
+                CameraUndistortion correction(size, path);
+                cv::Mat original(size, CV_8UC3, cv::Scalar(20, 30, 40));
+                for (int x = 0; x < size.width; x += 40)
+                    cv::line(original, {x, 0}, {x, size.height - 1}, {10, 200, 250}, 2);
+                cv::circle(original, {420, 280}, 80, {250, 40, 20}, -1);
+                const auto untouched = original.clone();
+                cv::Mat working = original;
+                correction.apply(working);
+                cv::Mat reference;
+                cv::undistort(original, reference, camera, distortion, camera);
+                require(working.size() == size && cv::norm(original, untouched, cv::NORM_INF) == 0,
+                    "undistortion changed sensor pixels or image size");
+                require(cv::norm(working, reference, cv::NORM_L1) / (size.area() * 3.0) < 0.05,
+                    "runtime correction differs from approved offline view");
+                require(correction.coordinateSystem().starts_with("undistorted-v1-"), "corrected coordinate identity missing");
+                write("undistortion-same-parameters.yml", distortion);
+                require(CameraUndistortion(size, "undistortion-same-parameters.yml").coordinateSystem() == correction.coordinateSystem(),
+                    "moving the same parameters changed coordinate identity");
+                auto changed = distortion.clone(); changed.at<double>(0, 0) += 0.01;
+                write("undistortion-changed-parameters.yml", changed);
+                require(CameraUndistortion(size, "undistortion-changed-parameters.yml").coordinateSystem() != correction.coordinateSystem(),
+                    "changed lens parameters reused coordinate identity");
+            }},
+            {"disabled and identity undistortion preserve geometry", [] {
+                const cv::Size size(96, 72);
+                cv::Mat original(size, CV_8UC3); cv::randu(original, 0, 255);
+                CameraUndistortion disabled(size);
+                auto frame = original.clone(); disabled.apply(frame);
+                require(disabled.coordinateSystem() == "raw" && cv::norm(frame, original, cv::NORM_INF) == 0,
+                    "disabled correction changed the raw input");
+                const std::string path = "undistortion-identity-test.yml";
+                cv::FileStorage file(path, cv::FileStorage::WRITE);
+                file << "image_width" << size.width << "image_height" << size.height
+                     << "camera_matrix" << (cv::Mat_<double>(3, 3) << 90, 0, 48, 0, 90, 36, 0, 0, 1)
+                     << "distortion_coefficients" << cv::Mat::zeros(1, 5, CV_64F);
+                file.release();
+                CameraUndistortion identity(size, path); identity.apply(frame);
+                require(cv::norm(frame, original, cv::NORM_INF) == 0, "zero distortion shifted input pixels");
+                bool rejected = false;
+                try { cv::Mat wrong(70, 96, CV_8UC3); identity.apply(wrong); }
+                catch (const std::exception&) { rejected = true; }
+                require(rejected, "changed capture size silently reused correction maps");
+            }},
+            {"invalid camera undistortion parameters fail before processing", [] {
+                const std::string path = "undistortion-invalid-test.yml";
+                const auto write = [&](cv::Size size, double focal, int coefficients) {
+                    cv::FileStorage file(path, cv::FileStorage::WRITE);
+                    file << "image_width" << size.width << "image_height" << size.height
+                         << "camera_matrix" << (cv::Mat_<double>(3, 3) << focal, 0, 48, 0, focal, 36, 0, 0, 1)
+                         << "distortion_coefficients" << cv::Mat::zeros(1, coefficients, CV_64F);
+                };
+                for (int scenario = 0; scenario < 4; ++scenario) {
+                    write(scenario == 0 ? cv::Size(128, 72) : cv::Size(96, 72),
+                        scenario == 1 ? -90 : scenario == 3 ? std::numeric_limits<double>::quiet_NaN() : 90,
+                        scenario == 2 ? 6 : 5);
+                    bool rejected = false;
+                    try { CameraUndistortion correction({96, 72}, path); }
+                    catch (const std::exception&) { rejected = true; }
+                    require(rejected, "invalid lens parameters were accepted");
+                }
+            }},
+            {"four point cache changes with camera undistortion coordinates", [] {
+                const std::string path = "undistortion-mapping-test.yml";
+                const std::vector<cv::Point2f> points{{200, 100}, {520, 100}, {520, 400}, {200, 400}};
+                const auto write = [&](const std::string& coordinates) {
+                    cv::FileStorage file(path, cv::FileStorage::WRITE);
+                    file << "camera_size" << cv::Size(720, 540) << "game_size" << cv::Size(1280, 720)
+                         << "output_rotation_ccw" << 0 << "camera_serial" << "lens-test"
+                         << "game_points" << calibrationTargets({1280, 720}) << "camera_points" << points;
+                    if (!coordinates.empty()) file << "camera_coordinate_system" << coordinates;
+                };
+                auto game = make(); game.config_.width = 1280;
+                game.cameraSize_ = {720, 540}; game.cameraId_ = "lens-test";
+                write(""); game.loadCalibration(path);
+                require(!game.cameraToGame_.empty(), "legacy raw mapping compatibility lost");
+                game.cameraCoordinateSystem_ = "undistorted-v1-a";
+                game.loadCalibration(path);
+                require(game.cameraToGame_.empty() && game.calibrationCorners_.empty(), "raw clicks were reused after undistortion");
+                write(game.cameraCoordinateSystem_); game.loadCalibration(path);
+                require(!game.cameraToGame_.empty(), "matching corrected mapping was rejected");
+                game.cameraCoordinateSystem_ = "undistorted-v1-b"; game.loadCalibration(path);
+                require(game.cameraToGame_.empty(), "old clicks were reused after lens coefficients changed");
+                game.cameraCoordinateSystem_ = "raw"; game.loadCalibration(path);
+                require(game.cameraToGame_.empty(), "corrected clicks were reused after disabling undistortion");
             }},
             {"invalid calibration cannot be accepted", [] {
                 const std::vector<std::vector<cv::Point2f>> bad{
@@ -667,6 +768,44 @@ struct GameTestAccess {
                 frame.setTo(cv::Scalar(0, 0, 0));
                 require(observeMoleRegions(frame, regions, {{10, 30, 60, 60}}, {}).state == MoleVisibility::Absent,
                         "one clear absent marker could not close observation");
+            }},
+            {"wide rotated projection reads side markers while the central mole is covered", [] {
+                GameConfig config;
+                config.width = 1280; config.height = 720;
+                config.hitRadius = 170; config.outputRotationCcw = 180;
+                config.targetStyle = "mole"; config.stateMarkers = 1;
+                Game game(config, GameMode::ObservationProbe);
+                // 保存的真实标定：相机中左右倒置，不能直接使用投影画布上的坐标。
+                const std::vector<cv::Point2f> corners{{502, 228}, {252, 222}, {260, 89}, {500, 94}};
+                const auto transform = cameraToGameTransform(corners, {720, 540}, game.gameSize());
+                const auto regions = moleObservationRegionsInCamera(transform, game.gameSize(), 170, true);
+                const auto centerRegion = moleRegionInCamera(transform, game.gameSize(), 170);
+                std::vector<cv::Point2f> centerHull;
+                cv::convexHull(centerRegion, centerHull);
+                const cv::Rect centralHand = cv::boundingRect(centerHull) + cv::Size(1, 1);
+                const auto captured = [&] {
+                    cv::Mat camera;
+                    cv::warpPerspective(game.render(), camera, transform.inv(), {720, 540});
+                    camera(centralHand).setTo(cv::Scalar(55, 75, 95));
+                    return camera;
+                };
+                for (const int brightness : {50, 100}) {
+                    game.config_.targetBrightness = brightness;
+                    game.phase_ = Game::Phase::Active;
+                    const auto on = captured();
+                    require(observeMole(on, centerRegion, {centralHand}, {}).state == MoleVisibility::Unknown,
+                            "fixture did not cover the center observation region");
+                    require(observeMoleRegions(on, regions, {centralHand}, {}).state == MoleVisibility::Visible,
+                            "current wide projection lost side-marker evidence under central occlusion");
+                    std::vector<cv::Point2f> firstHull;
+                    cv::convexHull(regions.front(), firstHull);
+                    const cv::Rect firstMarker = cv::boundingRect(firstHull);
+                    require(observeMoleRegions(on, regions, {centralHand, firstMarker}, {}).state == MoleVisibility::Visible,
+                            "one blocked side marker discarded the other marker in wide projection");
+                    game.phase_ = Game::Phase::Waiting;
+                    require(observeMoleRegions(captured(), regions, {centralHand}, {}).state == MoleVisibility::Absent,
+                            "side-marker on state was held after the target disappeared");
+                }
             }},
             {"state marker evidence permits central hand entry without holding stale state", [] {
                 auto game = make(true, true); startObserved(game);
