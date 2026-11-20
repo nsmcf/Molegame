@@ -11,6 +11,7 @@ struct MoleDetectorConfig {
     double visibleRatio = 0.20, absentRatio = 0.02;
     double minUnoccludedRatio = 0.30;
     int handMargin = 6;
+    int handYellowContrast = 30;
 };
 
 struct MoleObservation {

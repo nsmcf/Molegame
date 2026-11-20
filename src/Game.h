@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <optional>
 #include <random>
@@ -18,8 +19,8 @@ struct GameConfig {
     int hitRadius = 85;
     std::string targetStyle = "square";
     int targetBrightness = 100;
-    int stateMarkers = 1;
-    int displayMs = 500;
+    int stateMarkers = 0;
+    int displayMs = 400;
     int waitMinMs = 800;
     int waitMaxMs = 1800;
     int feedbackMs = 600;
@@ -44,6 +45,16 @@ private:
     enum class Phase { AwaitExit, Waiting, Active, Resolving, Feedback };
     enum class Outcome { Hit, Miss, Unjudged };
 
+    struct TrialResult {
+        Outcome outcome;
+        std::string timeText;
+        bool hasEntry;
+    };
+    std::deque<TrialResult> recentResults_;
+    static const char* outcomeText(Outcome outcome);
+    static cv::Scalar outcomeColor(Outcome outcome);
+    void drawPlayerScore(cv::Mat& frame, cv::Point center) const;
+
     GameConfig config_;
     Phase phase_ = Phase::AwaitExit;
     std::uint32_t randomSeed_ = std::random_device{}();
@@ -52,7 +63,7 @@ private:
     bool observationProbe_ = false;
     bool cameraJudgment_ = false;
     MoleVisibility currentMole_ = MoleVisibility::Unknown;
-    bool observedOn_ = false;
+    std::optional<Clock::time_point> firstVisibleAt_;
     std::ofstream observations_;
     cv::Point2f pointer_{-1, -1};
     bool inputKnown_ = false;
@@ -119,6 +130,7 @@ private:
     cv::Mat rotateForOutput(const cv::Mat& frame) const;
     cv::Size outputSize() const;
     cv::Size gameSize() const;
+    cv::Point2f hitCenter() const;
     cv::Mat fitForWindow(const cv::Mat& frame, cv::Size viewport);
     void toggleOutputRotation();
     void adjustTargetBrightness(int delta);

@@ -32,7 +32,7 @@ int main(int argc, char* argv[]) {
                 "Esc: exit, Space: reset, F: fullscreen, R: rotate 0/180, Up/Down: display +/- 50 ms.\n"
                 "Left/Right or [ / ]: target brightness -/+ 10% (10..100%).\n"
                 "Camera game: click projected labels 1,2,3,4 in camera preview, then Enter.\n"
-                "H: recalibrate. Use one hand; missing/ambiguous input may be UNJUDGED.\n"
+                "H: recalibrate. Use either hand; missing/ambiguous input may be UNJUDGED.\n"
                 "Observation probe: V toggles mole, A toggles automatic cycling, S saves raw + preview.\n"
                 "C toggles automatic raw + preview capture every 500 ms into outputs/observation-<id>/.\n";
             return 0;

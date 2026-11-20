@@ -5,9 +5,11 @@ hue_min: 10
 hue_max: 45
 saturation_min: 90
 value_min: 70
-# 可用区域中黄色像素的比例；中间区间保留 UNKNOWN。
+# VISIBLE 要求连续黄块达到指定比例；ABSENT 要求无遮挡且总黄色比例很低。
 visible_ratio: 0.20
 absent_ratio: 0.02
-# 同帧 YOLO 手框扩展后从区域中排除；可用面积不足则 UNKNOWN。
+# 手框外独立判定所需的最小可见面积比例。
+# 手上黄块与同一手框内外围暖色像素的最小黄色强度差（8 位色阶）。
+hand_yellow_contrast: 30
 min_unoccluded_ratio: 0.30
 hand_margin: 6

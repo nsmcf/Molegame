@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -106,6 +107,11 @@ cv::Size Game::gameSize() const {
     return config_.outputRotationCcw == 90 ? cv::Size(config_.height, config_.width) : outputSize();
 }
 
+cv::Point2f Game::hitCenter() const {
+    const auto size = gameSize();
+    return {size.width / 2.f, size.height / 2.f + 30};
+}
+
 cv::Mat Game::rotateForOutput(const cv::Mat& frame) const {
     if (config_.outputRotationCcw == 0) return frame;
     cv::Mat rotated;
@@ -183,8 +189,11 @@ void Game::onInput(std::optional<cv::Point2f> point, Clock::time_point sampledAt
         } else if (currentMole_ == MoleVisibility::Unknown) {
             markUncertain(evidenceReason.empty() ? "mole_unknown" : evidenceReason);
         } else if (currentMole_ == MoleVisibility::Visible) {
-            observedOn_ = true;
-        } else if (observedOn_) {
+            if (!firstVisibleAt_) {
+                firstVisibleAt_ = sampledAt;
+                logEvent("MOLE_FIRST_VISIBLE", receivedAt);
+            }
+        } else if (firstVisibleAt_) {
             finishTrial(trialUncertain_ ? Outcome::Unjudged : Outcome::Miss, receivedAt);
             trialOpen = false;
         }
@@ -200,8 +209,7 @@ void Game::onInput(std::optional<cv::Point2f> point, Clock::time_point sampledAt
         logEvent("INPUT_UNKNOWN", receivedAt);
         return;
     }
-    const cv::Point2f center(gameSize().width / 2.f, gameSize().height / 2.f + 30);
-    const auto delta = *point - center;
+    const auto delta = *point - hitCenter();
     const bool inside = delta.dot(delta) <= static_cast<float>(config_.hitRadius * config_.hitRadius);
     const bool entered = inputKnown_ && !inputInside_ && inside;
     pointer_ = *point;
@@ -278,7 +286,7 @@ void Game::submitFrame(Clock::time_point now) {
     submittedAt_ = now;
     deadline_ = now + std::chrono::milliseconds(activeDurationMs_);
     observationDeadline_ = deadline_ + std::chrono::milliseconds(config_.observationTimeoutMs);
-    observedOn_ = false;
+    firstVisibleAt_.reset();
     activeSubmitted_ = true;
     activeTargetBrightness_ = config_.targetBrightness;
     trialUncertain_ = !inputKnown_;
@@ -289,11 +297,20 @@ void Game::submitFrame(Clock::time_point now) {
 
 void Game::finishTrial(Outcome result, Clock::time_point now, Clock::time_point entryAt, const std::string& reason) {
     if ((phase_ != Phase::Active && phase_ != Phase::Resolving) || !activeSubmitted_) return;
+    const bool hasEntry = entryAt != Clock::time_point{};
+    const auto endAt = hasEntry ? entryAt : now;
+    const auto elapsedText = [endAt](Clock::time_point start) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(endAt - start);
+        return std::to_string(ms.count()) + " ms";
+    };
+    std::string timeText = elapsedText(submittedAt_);
+    if (cameraJudgment_) {
+        const auto cameraTime = firstVisibleAt_ ? elapsedText(*firstVisibleAt_) : "--";
+        timeText = cameraTime + " (" + timeText + ")";
+    }
     if (result == Outcome::Hit) {
         ++hits_;
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(entryAt - submittedAt_).count();
-        lastResult_ = "HIT - entry after " + std::to_string(elapsed) +
-            (cameraJudgment_ ? " ms from submission (same-frame mole visible)" : " ms (internal time)");
+        lastResult_ = "HIT - entry after " + timeText;
     } else if (result == Outcome::Unjudged) {
         ++unjudged_;
         const std::string cause = !reason.empty() ? reason : !uncertaintyReason_.empty() ? uncertaintyReason_ : "missing_evidence";
@@ -302,7 +319,9 @@ void Game::finishTrial(Outcome result, Clock::time_point now, Clock::time_point 
     } else {
         lastResult_ = cameraJudgment_ ? "MISS - no entry while observed mole was visible" : "MISS - internal window ended";
     }
-    logEvent("RESULT", now, result == Outcome::Hit ? "HIT" : result == Outcome::Miss ? "MISS" : "UNJUDGED");
+    recentResults_.push_front({result, timeText, hasEntry});
+    if (recentResults_.size() > 10) recentResults_.pop_back();
+    logEvent("RESULT", now, outcomeText(result));
     if (events_.is_open()) events_.flush();
     phase_ = Phase::Feedback;
     deadline_ = now + std::chrono::milliseconds(config_.feedbackMs);
@@ -312,14 +331,81 @@ void Game::reset(Clock::time_point now) {
     if (activeSubmitted_ && (phase_ == Phase::Active || phase_ == Phase::Resolving))
         finishTrial(Outcome::Unjudged, now, {}, "manual_reset");
     logEvent("RESET", now);
+    recentResults_.clear();
     trials_ = 0;
     hits_ = 0;
     unjudged_ = 0;
     phase_ = Phase::AwaitExit;
     activeSubmitted_ = false;
-    observedOn_ = false;
+    firstVisibleAt_.reset();
     ignoreBefore_ = now;
     lastResult_ = "Reset - no result yet";
+}
+
+const char* Game::outcomeText(Outcome outcome) {
+    switch (outcome) {
+    case Outcome::Hit: return "HIT";
+    case Outcome::Miss: return "MISS";
+    case Outcome::Unjudged: return "UNJUDGED";
+    }
+    throw std::logic_error("Invalid outcome");
+}
+
+cv::Scalar Game::outcomeColor(Outcome outcome) {
+    switch (outcome) {
+    case Outcome::Hit: return {105, 238, 108};
+    case Outcome::Miss: return {80, 85, 255};
+    case Outcome::Unjudged: return {55, 220, 255};
+    }
+    throw std::logic_error("Invalid outcome");
+}
+
+void Game::drawPlayerScore(cv::Mat& frame, cv::Point center) const {
+    const double scale = std::min(frame.cols / 960.0, frame.rows / 640.0);
+    const int font = cv::FONT_HERSHEY_SIMPLEX;
+    const int margin = cvRound(20 * scale);
+    const int stroke = std::max(1, cvRound(1.5 * scale));
+    const auto drawScoreLine = [&](const std::string& text, int y, double fontScale, cv::Scalar color) {
+        cv::putText(frame, text, {margin, y}, font, fontScale, color, stroke, cv::LINE_AA);
+    };
+    // 只在回合结算后更新比分的分母，避免地鼠出现时先增加一次未命中。
+    const bool inProgress = activeSubmitted_ && (phase_ == Phase::Active || phase_ == Phase::Resolving);
+    const int completed = trials_ - static_cast<int>(inProgress);
+    int y = margin + cvRound(20 * scale);
+    drawScoreLine("Hits  " + std::to_string(hits_) + " / " + std::to_string(completed),
+               y, 0.9 * scale, {235, 235, 235});
+
+    const bool roundDurationLocked = phase_ == Phase::Active || phase_ == Phase::Resolving || phase_ == Phase::Feedback;
+    const int durationMs = roundDurationLocked ? activeDurationMs_ : config_.displayMs;
+    const auto drawDuration = [&](const std::string& text, int baseline, double fontScale, cv::Scalar color) {
+        const int width = cv::getTextSize(text, font, fontScale, stroke, nullptr).width;
+        cv::putText(frame, text, {frame.cols - margin - width, baseline},
+                    font, fontScale, color, stroke, cv::LINE_AA);
+    };
+    drawDuration("Display: " + std::to_string(durationMs) + " ms", y, 0.9 * scale, {235, 235, 235});
+    if (durationMs != config_.displayMs)
+        drawDuration("Next: " + std::to_string(config_.displayMs) + " ms", y + cvRound(26 * scale),
+                     0.62 * scale, {170, 170, 170});
+
+    for (const auto& record : recentResults_) {
+        y += cvRound(26 * scale);
+        const std::string row = std::string(outcomeText(record.outcome)) +
+            (record.hasEntry ? "   " : "   end ") + record.timeText;
+        const double rowScale = 0.62 * scale;
+        const int width = cv::getTextSize(row, font, rowScale, stroke, nullptr).width;
+        const int available = std::max(1, center.x - config_.hitRadius - 25 - 2 * margin);
+        drawScoreLine(row, y, rowScale * std::min(1.0, static_cast<double>(available) / width),
+                      outcomeColor(record.outcome));
+    }
+    if (phase_ == Phase::Feedback && !recentResults_.empty()) {
+        const auto outcome = recentResults_.front().outcome;
+        const int thickness = std::max(2, cvRound(4 * scale));
+        const double fontScale = 1.8 * scale;
+        const char* label = outcomeText(outcome);
+        const int width = cv::getTextSize(label, font, fontScale, thickness, nullptr).width;
+        cv::putText(frame, label, {center.x - width / 2, center.y - config_.hitRadius - 25 - margin},
+                    font, fontScale, outcomeColor(outcome), thickness, cv::LINE_AA);
+    }
 }
 
 cv::Mat Game::render() const {
@@ -332,21 +418,14 @@ cv::Mat Game::render() const {
     const int brightness = !observationProbe_ && activeSubmitted_ &&
         (phase_ == Phase::Active || phase_ == Phase::Resolving) ? activeTargetBrightness_ : config_.targetBrightness;
     const double intensity = brightness / 100.0;
-    putFittedText(frame, observationProbe_ ? "MoleGame | Same-frame observation probe" :
-        cameraJudgment_ ? "MoleGame | YOLO + Camera observation" :
-        useCamera_ ? "MoleGame | YOLO + Internal timing" : "MoleGame | Mouse preview",
-        {28, 40}, cv::FONT_HERSHEY_SIMPLEX, 0.85, white, 2, cv::LINE_AA);
-    putFittedText(frame, observationProbe_ ? "No scoring | V: toggle mole | A: auto cycle | S: save frame" :
-        cameraJudgment_ ? "Single hand | H: recalibrate | same-frame mole visibility" :
-        useCamera_ ? "Single hand | H: recalibrate | internal display window" :
-        "Mouse preview - internal timing only", {28, 73},
-        cv::FONT_HERSHEY_SIMPLEX, 0.5, muted, 1, cv::LINE_AA);
-    putFittedText(frame, "Display: " + std::to_string(config_.displayMs) + " ms   Brightness: " + std::to_string(brightness) + "%" +
-        (brightness != config_.targetBrightness ? " (next " + std::to_string(config_.targetBrightness) + "%)" : "") +
-        (observationProbe_ ? "   Observation only - no trial scores" : "   Hits: " + std::to_string(hits_) +
-        "   Trials: " + std::to_string(trials_) + "   Unjudged: " + std::to_string(unjudged_)),
-        {28, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.65, white, 1, cv::LINE_AA);
-    putFittedText(frame, lastResult_, {28, 142}, cv::FONT_HERSHEY_SIMPLEX, 0.5, muted, 1, cv::LINE_AA);
+    if (observationProbe_) {
+        putFittedText(frame, "MoleGame | Same-frame observation probe", {28, 40},
+            cv::FONT_HERSHEY_SIMPLEX, 0.85, white, 2, cv::LINE_AA);
+        putFittedText(frame, "No scoring | V: toggle mole | A: auto cycle | S: save frame", {28, 73},
+            cv::FONT_HERSHEY_SIMPLEX, 0.5, muted, 1, cv::LINE_AA);
+        putFittedText(frame, "Display: " + std::to_string(config_.displayMs) + " ms   Brightness: " +
+            std::to_string(brightness) + "%", {28, 108}, cv::FONT_HERSHEY_SIMPLEX, 0.65, white, 1, cv::LINE_AA);
+    }
 
     cv::circle(frame, center, radius + 25, cv::Scalar(66, 60, 57), -1, cv::LINE_AA);
     cv::circle(frame, center, radius + 13, cv::Scalar(10, 10, 10), -1, cv::LINE_AA);
@@ -370,26 +449,36 @@ cv::Mat Game::render() const {
         }
     }
     cv::circle(frame, center, radius, cv::Scalar(220, 220, 220), 2, cv::LINE_AA);
-    const std::string status = observationProbe_ ? "Check observed state in the CAMERA window" :
-        phase_ == Phase::Active ? "MOVE INTO THE CIRCLE" :
-        phase_ == Phase::Resolving ? (cameraJudgment_ ? "Waiting for camera evidence" : "Waiting for result") :
-        !inputFresh(Clock::now()) ? (useCamera_ ? "Show one hand outside the circle" : "Move mouse outside the circle") :
-        cameraJudgment_ && phase_ == Phase::AwaitExit && currentMole_ != MoleVisibility::Absent ? "Clear the hole for camera observation" :
-        phase_ == Phase::Waiting ? "Wait for the mole" : "Move outside the circle";
-    const int fullTextWidth = cv::getTextSize(status, cv::FONT_HERSHEY_SIMPLEX, 0.7, 1, nullptr).width;
-    const double statusScale = 0.7 * std::min(1.0, static_cast<double>(size.width - 40) / std::max(1, fullTextWidth));
-    const int textWidth = cv::getTextSize(status, cv::FONT_HERSHEY_SIMPLEX, statusScale, 1, nullptr).width;
-    cv::putText(frame, status, {center.x - textWidth / 2, center.y + radius + 65},
-        cv::FONT_HERSHEY_SIMPLEX, statusScale, white, 1, cv::LINE_AA);
-    if (inputFresh(Clock::now())) {
+    if (!observationProbe_) drawPlayerScore(frame, center);
+    if ((!useCamera_ || observationProbe_) && inputFresh(Clock::now())) {
         cv::circle(frame, pointer_, 7, cv::Scalar(80, 80, 255), -1, cv::LINE_AA);
         cv::circle(frame, pointer_, 9, white, 1, cv::LINE_AA);
     }
-    putFittedText(frame, observationProbe_ ? "Test: absent / visible / partial cover / full cover" :
-        "Move outside -> wait -> enter the circle. No click needed.", {28, size.height - 58},
-        cv::FONT_HERSHEY_SIMPLEX, 0.5, muted, 1, cv::LINE_AA);
-    putFittedText(frame, "Esc: exit   Space: reset   F: fullscreen   R: rotate   Up/Down: time   Left/Right: brightness", {28, size.height - 28},
-        cv::FONT_HERSHEY_SIMPLEX, 0.5, muted, 1, cv::LINE_AA);
+    const char* prompt = "Ready";
+    if (observationProbe_) {
+        prompt = phase_ == Phase::Active ? "Observation: mole on" : "Observation: mole off";
+        putFittedText(frame, "Esc: exit   Space: reset   F: fullscreen   R: rotate   Up/Down: time   Left/Right: brightness",
+            {28, size.height - 28}, cv::FONT_HERSHEY_SIMPLEX, 0.5, muted, 1, cv::LINE_AA);
+    } else {
+        switch (phase_) {
+        case Phase::AwaitExit:
+            if (!inputFresh(Clock::now()))
+                prompt = useCamera_ ? "Show your hands outside the circle" : "Move outside the circle";
+            else if (inputInside_)
+                prompt = "Move outside the circle";
+            else if (cameraJudgment_ && currentMole_ != MoleVisibility::Absent)
+                prompt = "Waiting for a clear circle";
+            break;
+        case Phase::Waiting:   prompt = "Wait for the mole"; break;
+        case Phase::Active:    prompt = "Hit the mole"; break;
+        case Phase::Resolving: prompt = "Judging"; break;
+        case Phase::Feedback:  prompt = "Round complete"; break;
+        }
+    }
+    const double scale = std::min(size.width / 960.0, size.height / 640.0) * 0.68;
+    const int width = cv::getTextSize(prompt, cv::FONT_HERSHEY_SIMPLEX, scale, 1, nullptr).width;
+    cv::putText(frame, prompt, {center.x - width / 2, center.y + radius + 60},
+                cv::FONT_HERSHEY_SIMPLEX, scale, white, 1, cv::LINE_AA);
     return frame;
 }
 
@@ -446,7 +535,8 @@ void Game::openLog() {
              << "game_points" << calibrationTargets(gameSize())
              << "input_timeout_ms" << config_.inputTimeoutMs
              << "observation_timeout_ms" << config_.observationTimeoutMs
-             << "mole_state_source" << (config_.stateMarkers ? "same_frame_synchronous_side_markers" : "same_frame_center_color")
+             << "mole_state_source" << (config_.stateMarkers ? "same_frame_synchronous_side_markers" : "same_frame_center_connected_yellow")
+             << "hand_entry_rule" << "any_detected_hand_enters_circle"
              << "timestamp_source" << "host_after_conversion_and_clone"
              << "random_engine" << "mt19937" << "random_seed" << std::to_string(randomSeed_);
     if (observationProbe_)
@@ -663,16 +753,27 @@ void Game::run() {
                 currentSampleAt_ = sample.capturedAt;
                 const auto receivedAt = Clock::now();
                 std::optional<cv::Point2f> point;
-                if (sample.centers.size() == 1 && !cameraToGame_.empty()) {
+                if (!sample.centers.empty() && !cameraToGame_.empty()) {
                     std::vector<cv::Point2f> mapped;
                     cv::perspectiveTransform(sample.centers, mapped, cameraToGame_);
-                    if (std::isfinite(mapped[0].x) && std::isfinite(mapped[0].y) &&
-                        std::abs(mapped[0].x) < 1e6 && std::abs(mapped[0].y) < 1e6) point = mapped[0];
+                    // 最近的手点在圈内，等价于本帧至少有一只手在圈内。
+                    const auto center = hitCenter();
+                    float nearestSquared = std::numeric_limits<float>::infinity();
+                    for (const auto& hand : mapped) {
+                        if (!std::isfinite(hand.x) || !std::isfinite(hand.y) ||
+                            std::abs(hand.x) >= 1e6 || std::abs(hand.y) >= 1e6) continue;
+                        const auto offset = hand - center;
+                        const float squared = offset.dot(offset);
+                        if (squared < nearestSquared) {
+                            nearestSquared = squared;
+                            point = hand;
+                        }
+                    }
                 }
                 const bool regionMatches = sample.regionRevision == regionRevision;
                 if (!calibrating_ && !regionMatches) point.reset();
                 const std::string evidenceReason = !regionMatches ? "calibration_changed" :
-                    sample.centers.empty() ? "no_hand" : sample.centers.size() > 1 ? "multiple_hands" :
+                    sample.centers.empty() ? "no_hand" :
                     !point ? "invalid_hand_mapping" : sample.mole.reason;
                 if (!calibrating_ && !observationProbe_)
                     onInput(point, sample.capturedAt, receivedAt, sample.sequence,
@@ -743,7 +844,7 @@ void Game::run() {
                     for (const auto& p : cameraRing) polygon.emplace_back(p);
                     cv::polylines(annotated, polygon, true, cv::Scalar(255, 150, 0), 2);
                 }
-                cv::putText(annotated, "One hand only | H: calibrate | Esc: exit", {10, 25},
+                cv::putText(annotated, "Either hand | H: calibrate | Esc: exit", {10, 25},
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 220, 255), 1);
                 if (observationProbe_ || cameraJudgment_) {
                     if (!calibrating_ && !molePolygons.empty())
